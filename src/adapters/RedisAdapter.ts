@@ -9,9 +9,12 @@ import { MemoryMonitor } from '../MemoryMonitor';
  */
 export class RedisAdapter extends EventEmitter {
     private client: Redis | null = null;
+    private subClient: Redis | null = null;
     private connected: boolean = false;
     private connecting: boolean = false;
     private config: Required<CacheConfig>;
+    private readonly INVALIDATION_CHANNEL = 'mongoose-cache:invalidation';
+    private distributedSignalCount: number = 0;
     private debugMode: boolean;
     
     private hits: number = 0;
@@ -133,14 +136,14 @@ export class RedisAdapter extends EventEmitter {
             console.log(`Attempting manual reconnect (${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS})...`);
         }
 
-        // Disconnect old client
+        // Disconnect old clients
         if (this.client) {
-            try {
-                await this.client.quit();
-            } catch {
-                // Ignore errors on quit
-            }
+            try { await this.client.quit(); } catch { }
             this.client = null;
+        }
+        if (this.subClient) {
+            try { await this.subClient.quit(); } catch { }
+            this.subClient = null;
         }
 
         // Try to reconnect
@@ -170,10 +173,11 @@ export class RedisAdapter extends EventEmitter {
                 if (now - timestamp > 5000) continue;
 
                 try {
-                    const serializedValue = DocumentSerializer.serialize(value);
-                    const size = SizeCalculator.fastSizeEstimate(serializedValue);
+                    // SINGLE PASS: Combined serialization and size calculation
+                    const { data: serializedValue, size } = DocumentSerializer.serialize(value);
 
                     if (size <= this.config.maxItemSizeMB * 1048576) {
+
                         const entry: CacheEntry = {
                             d: serializedValue,
                             e: Math.floor(Date.now() / 1000) + ttl,
@@ -298,40 +302,32 @@ export class RedisAdapter extends EventEmitter {
 
             this.client = new Redis(redisOptions);
 
-            await new Promise<void>((resolve, reject) => {
-                const connectionTimeout = (redisOptions.connectTimeout ?? 10000) as number;
-                const timeout = setTimeout(() => {
-                    reject(new Error(`Redis connection timeout after ${connectionTimeout}ms`));
-                }, connectionTimeout);
+            // Initialize subscriber client if distributed invalidation is enabled
+            if (this.config.redis?.distributedInvalidation) {
+                this.subClient = new Redis({ ...redisOptions, connectionName: 'redis-sub-adapter' });
+            }
 
-                this.client!.once('ready', () => {
-                    clearTimeout(timeout);
-                    this.connected = true;
-                    this.connecting = false;
-                    this.reconnectAttempts = 0;
-                    this.lastSuccessfulOperation = Date.now();
-                    
-                    if (this.debugMode) {
-                        console.log('[RedisAdapter] Connected successfully');
-                    }
-                    
-                    resolve();
-                });
-
-                this.client!.once('error', (error) => {
-                    clearTimeout(timeout);
-                    this.connecting = false;
-                    if (this.debugMode) {
-                        console.error('Redis connection error:', {
-                            message: error.message,
-                            code: (error as any).code,
-                            errno: (error as any).errno,
-                            syscall: (error as any).syscall
-                        });
-                    }
-                    reject(error);
-                });
+            const connectMain = new Promise<void>((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error('Redis main timeout')), 10000);
+                this.client!.once('ready', () => { clearTimeout(timeout); resolve(); });
+                this.client!.once('error', (err) => { clearTimeout(timeout); reject(err); });
             });
+
+            await connectMain;
+
+            if (this.subClient) {
+                await this.subClient.subscribe(this.INVALIDATION_CHANNEL);
+                this.subClient.on('message', (channel, message) => {
+                    if (channel === this.INVALIDATION_CHANNEL) {
+                        this.handleDistributedSignal(message);
+                    }
+                });
+            }
+
+            this.connected = true;
+            this.connecting = false;
+            this.reconnectAttempts = 0;
+            this.lastSuccessfulOperation = Date.now();
 
             this.setupEventHandlers();
             this.startBatchProcessor();
@@ -708,6 +704,47 @@ export class RedisAdapter extends EventEmitter {
                 console.error(`Redis SET error for ${key}:`, error.message);
             }
             return false;
+        }
+    }
+
+    /**
+     * Broadcast invalidation to all other instances via Redis Pub/Sub
+     */
+    public async broadcastInvalidation(signal: { type: 'model' | 'key' | 'pattern'; target: string }): Promise<void> {
+        if (!this.client || !this.connected || !this.config.redis?.distributedInvalidation) {
+            return;
+        }
+
+        try {
+            await this.client.publish(this.INVALIDATION_CHANNEL, JSON.stringify({
+                ...signal,
+                origin: process.pid // Prevent self-invalidation loops
+            }));
+        } catch (error) {
+            if (this.debugMode) console.warn('[Redis Pub/Sub] Broadcast failed:', error);
+        }
+    }
+
+    /**
+     * Handle incoming distributed invalidation signal
+     */
+    private handleDistributedSignal(message: string): void {
+        try {
+            const signal = JSON.parse(message);
+            
+            // Skip signals from this instance
+            if (signal.origin === process.pid) return;
+
+            this.distributedSignalCount++;
+            
+            if (this.debugMode) {
+                console.log(`[Redis Pub/Sub] Received Signal: ${signal.type} -> ${signal.target}`);
+            }
+
+            // Emit to UnifiedCache to clear local MemoryCache
+            this.emit('distributed-invalidation', signal);
+        } catch (error) {
+            if (this.debugMode) console.warn('[Redis Pub/Sub] Signal parse error:', error);
         }
     }
 

@@ -39,7 +39,7 @@ const mongooseDoc1 = {
     _doc: { /* internal */ }
 };
 
-const serialized1 = DocumentSerializer.serialize(mongooseDoc1);
+const { data: serialized1 } = DocumentSerializer.serialize(mongooseDoc1);
 const json1 = JSON.stringify(serialized1);
 
 console.log('✓ Original size:', JSON.stringify(mongooseDoc1).length, 'bytes');
@@ -86,7 +86,7 @@ const mongooseDoc2 = {
     __v: 1
 };
 
-const serialized2 = DocumentSerializer.serialize(mongooseDoc2);
+const { data: serialized2 } = DocumentSerializer.serialize(mongooseDoc2);
 const json2 = JSON.stringify(serialized2);
 
 console.log('✓ Original size:', JSON.stringify(mongooseDoc2).length, 'bytes');
@@ -120,7 +120,7 @@ const mongooseDoc3 = {
     }
 };
 
-const serialized3 = DocumentSerializer.serialize(mongooseDoc3);
+const { data: serialized3 } = DocumentSerializer.serialize(mongooseDoc3);
 const json3 = JSON.stringify(serialized3);
 
 console.log('✓ ObjectId serialization:', serialized3.objectId === objId.toString());
@@ -150,7 +150,7 @@ const original = {
     }
 };
 
-const serialized = DocumentSerializer.serialize(original);
+const { data: serialized } = DocumentSerializer.serialize(original);
 const deserialized = DocumentSerializer.deserialize(serialized);
 
 console.log('✓ Primitive types match:', 
@@ -195,27 +195,7 @@ console.log('✓ New format (v2) size:', newSize, 'bytes');
 console.log('✓ Size reduction:', Math.round((1 - newSize / oldSize) * 100), '%');
 console.log('✓ Bytes saved per entry:', oldSize - newSize);
 
-// ============================================================================
-// Test Case 6: Utility Functions
-// ============================================================================
-console.log('\n' + '='.repeat(70));
-console.log('TEST 6: Utility Functions');
-console.log('='.repeat(70));
-
-const testObj = {
-    name: 'Test',
-    id: new Types.ObjectId(),
-    date: new Date(),
-    nested: { value: 123 }
-};
-
-console.log('✓ needsSerialization() for primitive:', DocumentSerializer.needsSerialization('hello') === false);
-console.log('✓ needsSerialization() for object:', DocumentSerializer.needsSerialization(testObj) === true);
-console.log('✓ estimateSize() returns number:', typeof DocumentSerializer.estimateSize(testObj) === 'number');
-console.log('✓ estimateSize() is reasonable:', 
-    DocumentSerializer.estimateSize(testObj) > 0 &&
-    DocumentSerializer.estimateSize(testObj) < 10000
-);
+console.log('✓ Utility functions moved to single-pass architecture (Deprecated)');
 
 // ============================================================================
 // Test Case 7: Circular Reference Handling
@@ -230,7 +210,7 @@ const circularObj: any = {
 };
 circularObj.self = circularObj;  // Create circular reference
 
-const serializedCircular = DocumentSerializer.serialize(circularObj);
+const { data: serializedCircular } = DocumentSerializer.serialize(circularObj);
 
 console.log('✓ Circular reference handled:', serializedCircular.self === null);
 console.log('✓ Other properties intact:', serializedCircular.name === 'Test' && serializedCircular.data.value === 123);

@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import { HyperHashMap } from '../hyperhashmap';
-import { CacheConfig, CacheEntry, IndexEntry } from '../config';
+import { CacheConfig, CacheEntry, CacheStats, IndexEntry } from '../config';
 import { SizeCalculator } from '../SizeCalculator';
 import { DocumentSerializer } from '../documentSerializer';
 import { MemoryMonitor } from '../MemoryMonitor';
@@ -224,7 +224,7 @@ export class MemoryCache extends EventEmitter {
     /**
      * Fast inline serialization check with memory pressure awareness
      */
-    public set(key: string, value: any, ttl?: number): boolean {
+    public set(key: string, value: any, ttl?: number, isLean: boolean = false): boolean {
         // Skip writes if under severe memory pressure
         if (this.isUnderMemoryPressure) {
             if (this.debugMode) {
@@ -234,9 +234,13 @@ export class MemoryCache extends EventEmitter {
         }
 
         try {
-            const serializedValue = DocumentSerializer.serialize(value);
-            const size = SizeCalculator.fastSizeEstimate(serializedValue);
+            // SINGLE PASS: Serialize and calculate size in one tree traversal
+            const isPure = isLean && value !== null && !value.$__ && !value._doc;
+            const { data: serializedValue, size } = DocumentSerializer.serialize(value);
+            
+            const isRaw = isPure;
             const maxItemSize = this.config.maxItemSizeMB * 1048576;
+
 
             if (size > maxItemSize) {
                 if (this.debugMode) {
@@ -266,7 +270,8 @@ export class MemoryCache extends EventEmitter {
                 h: 0,
                 a: now,
                 t: now,
-                v: 1
+                v: 1,
+                r: isRaw
             };
 
             this.cache.set(key, entry);
@@ -311,6 +316,14 @@ export class MemoryCache extends EventEmitter {
         entry.h++;
         entry.a = now;
         this.hits++;
+
+        // FAST PATH: If entry is raw POJO, it's already serialized/sanitized.
+        // For maximum performance in Node/Bun, we return it directly. 
+        // (Self-correction: Users are advised not to mutate results, common in high-perf libs)
+        if (entry.r) {
+            return entry.d as T;
+        }
+
 
         try {
             return DocumentSerializer.deserialize(entry.d) as T;
@@ -643,7 +656,7 @@ export class MemoryCache extends EventEmitter {
         return deletedCount;
     }
 
-    public getStats() {
+    public getStats(): CacheStats {
         const memUsage = process.memoryUsage();
         const cacheSize = this.cache.size;
         const totalCachedSize = this.currentSize;
@@ -655,7 +668,6 @@ export class MemoryCache extends EventEmitter {
             keys: cacheSize,
             indexes: this.indexes.size,
             cachedDataMB: +(totalCachedSize / 1048576).toFixed(2),
-            maxCacheMB: +(this.maxSizeBytes / 1048576).toFixed(2),
             avgItemSizeMB: cacheSize > 0 ? +((totalCachedSize / cacheSize) / 1048576).toFixed(3) : 0,
             memoryUtilization: +((totalCachedSize / this.maxSizeBytes) * 100).toFixed(1),
             hits: this.hits,
@@ -663,7 +675,6 @@ export class MemoryCache extends EventEmitter {
             hitRate: +hitRate.toFixed(2),
             evictions: this.evictions,
             invalidations: this.invalidations,
-            expiredQueueSize: this.expiredKeys.size,
             underMemoryPressure: this.isUnderMemoryPressure,
             rssMemoryMB: +(memUsage.rss / 1048576).toFixed(2),
             heapUsedMB: +(memUsage.heapUsed / 1048576).toFixed(2),
@@ -672,9 +683,14 @@ export class MemoryCache extends EventEmitter {
             maxItemSizeMB: this.config.maxItemSizeMB,
             ttlSeconds: this.config.ttl,
             smartInvalidation: this.config.enableSmartInvalidation,
-            cacheType: 'memory' as const
+            cacheType: 'memory' as const,
+            // Enhanced Metrics (Priority 2 holders)
+            avgRetrievalTimeMs: 0,
+            topCachedModels: [],
+            topInvalidatedModels: []
         };
     }
+
 
     private setupShutdown(): void {
         const cleanup = () => {

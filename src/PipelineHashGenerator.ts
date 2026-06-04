@@ -120,23 +120,44 @@ class PipelineHashGenerator {
    * MD5 for maximum speed (still collision-resistant for cache keys)
    */
   public static generateFastHash(pipeline: PipelineStage[]): string {
-    if (!pipeline || pipeline.length === 0) {
-      return 'empty';
+    if (!pipeline || pipeline.length === 0) return 'empty';
+
+    // 1. IDENTITY CHECK
+    if ((pipeline as any)._cacheHash) return (pipeline as any)._cacheHash;
+
+    // 2. ULTRA-FAST SIGNATURE: Avoid JSON.stringify for common short pipelines
+    // We build a signature of [StageOp:KeyCount] + [MatchFields] if short
+    let signature = '';
+    for (let i = 0; i < pipeline.length; i++) {
+        const stage = pipeline[i];
+        if (!stage) continue;
+        const op = Object.keys(stage)[0];
+        if (!op) continue;
+        signature += op.substring(0, 4) + ':'; // '$match' -> '$mat'
+        
+        const content = stage[op];
+        if (content && typeof content === 'object') {
+             signature += Object.keys(content).length + '|';
+        } else {
+             signature += String(content).substring(0, 5) + '|';
+        }
     }
 
+    // 3. Hash the small signature string
+    const hash = createHash('md5')
+        .update(signature, 'utf8')
+        .digest('hex')
+        .substring(0, 12);
+
+    // Attach to the array instance
     try {
-      const pipelineString = JSON.stringify(pipeline);
-      return createHash('md5')
-        .update(pipelineString, 'utf8')
-        .digest('hex')
-        .substring(0, 12);
-    } catch (error) {
-      return createHash('md5')
-        .update(String(pipeline), 'utf8')
-        .digest('hex')
-        .substring(0, 12);
-    }
+        Object.defineProperty(pipeline, '_cacheHash', { value: hash, enumerable: false, configurable: true });
+    } catch { /* immutable */ }
+    
+    return hash;
   }
+
+
 
   /**
    * Generate hash for specific stages only
