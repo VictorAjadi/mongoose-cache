@@ -15,8 +15,10 @@ export type CacheConfig = {
         password?: string; // Redis authentication password
         db?: number; // Redis database number
         keyPrefix?: string; // Prefix for all Redis keys
+        distributedInvalidation?: boolean; // Enable cross-instance invalidation via Pub/Sub
     };
 }
+
 
 export interface CacheEntry {
     d: any; // Serialized data
@@ -57,6 +59,11 @@ export interface CacheStats {
     redisMemoryUsageMB?: number; // Redis memory usage in MB
     redisMaxMemoryMB?: number; // Redis max memory in MB
     underMemoryPressure?: boolean; // Memory pressure status
+    // Enhanced Metrics (Priority 2)
+    avgRetrievalTimeMs: number; // Average time to retrieve from cache
+    topCachedModels: Array<{ model: string; hits: number }>; // Most active models
+    topInvalidatedModels: Array<{ model: string; count: number }>; // Most invalidated models
+    distributedSignalCount?: number; // Number of Pub/Sub signals received
 }
 
 export const DEFAULT_CONFIG: Required<CacheConfig> = {
@@ -76,5 +83,6 @@ export const DEFAULT_CONFIG: Required<CacheConfig> = {
         password: undefined,
         db: 0,
         keyPrefix: 'mongoose:cache:',
+        distributedInvalidation: true,
     },
 };
