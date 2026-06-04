@@ -161,6 +161,20 @@ export class UnifiedCache {
                             console.log('[Redis] Reconnected successfully');
                         }
                     });
+
+                    // Priority 2: Distributed Invalidation
+                    this.redisAdapter.on('distributed-invalidation', (signal) => {
+                        if (this.memoryCache) {
+                            if (this.config.debug) console.log(`[Distributed] Applying ${signal.type} invalidation to local MemoryCache`);
+                            if (signal.type === 'model') {
+                                this.memoryCache.invalidateModel(signal.target);
+                            } else if (signal.type === 'key') {
+                                this.memoryCache.delete(signal.target);
+                            } else if (signal.type === 'pattern') {
+                                this.memoryCache.deletePattern(signal.target);
+                            }
+                        }
+                    });
                 }
 
                 // Attempt connection (RedisAdapter.connect() waits for actual TCP handshake)
@@ -288,7 +302,7 @@ export class UnifiedCache {
      * @param ttl - Time-to-live in seconds (uses config default if omitted)
      * @returns true if set successful, false on error
      */
-    public async set(key: string, value: any, ttl?: number): Promise<boolean> {
+    public async set(key: string, value: any, ttl?: number, isLean: boolean = false): Promise<boolean> {
         // Ensure Redis is ready before first use (non-blocking wait)
         if (this.useRedis && !this.redisInitialized) {
             await this.ensureRedisReady(5000);
@@ -303,17 +317,12 @@ export class UnifiedCache {
                 // Only fall back if Redis is truly disconnected
                 if (!result) {
                     const stats = this.redisAdapter?.getStats();
-                    if (!stats?.connected) {
-                        if (this.config.debug) {
-                            console.warn('[Cache] Redis unavailable for SET, using memory cache');
-                        }
-                        return this.memoryCache.set(key, value, ttl);
-                    }
+                    if (!stats?.connected) return this.memoryCache.set(key, value, ttl, isLean);
                 }
                 
                 return result;
             } else {
-                return cache.set(key, value, ttl);
+                return cache.set(key, value, ttl, isLean);
             }
         } catch (error: any) {
             if (this.config.debug) {
@@ -344,27 +353,42 @@ export class UnifiedCache {
             await this.ensureRedisReady(5000);
         }
 
-        try {
-            const cache = this.getActiveCache();
+        const cache = this.getActiveCache();
 
+        // FAST PATH: Memory hit returning immediately
+        if (cache instanceof MemoryCache) {
+            const result = cache.get<T>(key);
+            // Record hit model in background - use process.nextTick for even lower latency than setImmediate
+            if (result !== null) {
+                process.nextTick(() => {
+                    const model = key.substring(0, key.indexOf(':'));
+                    if (model) this.recordModelHit(model);
+                });
+            }
+            return result;
+        }
+
+        try {
             if (cache instanceof RedisAdapter) {
+                const startTime = performance.now();
                 const result = await cache.get<T>(key);
                 
-                // Only fall back if Redis is truly disconnected AND result is null
+                // Track metrics in background
+                setImmediate(() => {
+                    const duration = performance.now() - startTime;
+                    this.recordRetrievalTime(duration);
+                    const model = key.substring(0, key.indexOf(':'));
+                    if (model) this.recordModelHit(model);
+                });
+
                 if (result === null) {
-                    const stats = this.redisAdapter?.getStats();
-                    if (!stats?.connected) {
-                        if (this.config.debug) {
-                            console.warn('[Cache] Redis unavailable for GET, checking memory cache');
-                        }
-                        return this.memoryCache.get<T>(key);
-                    }
+                    const stats = (this.redisAdapter as any).getStats();
+                    if (!stats?.connected) return this.memoryCache.get<T>(key);
                 }
-                
                 return result;
-            } else {
-                return cache.get<T>(key);
             }
+            // Fallback for any other adapter type
+            return (cache as any).get(key);
         } catch (error: any) {
             if (this.config.debug) {
                 console.error('[Cache] GET error:', error.message);
@@ -637,6 +661,23 @@ export class UnifiedCache {
     }
 
 
+    private retrievalTimes: number[] = [];
+    private modelHits: Map<string, number> = new Map();
+    private modelInvalidations: Map<string, number> = new Map();
+
+    private recordRetrievalTime(ms: number): void {
+        this.retrievalTimes.push(ms);
+        if (this.retrievalTimes.length > 1000) this.retrievalTimes.shift(); // Window
+    }
+
+    private recordModelHit(model: string): void {
+        this.modelHits.set(model, (this.modelHits.get(model) || 0) + 1);
+    }
+
+    private recordModelInvalidation(model: string): void {
+        this.modelInvalidations.set(model, (this.modelInvalidations.get(model) || 0) + 1);
+    }
+
     /**
      * Fast MD5 hash for cache keys
      *
@@ -740,9 +781,13 @@ export class UnifiedCache {
 
             if (this.useRedis && this.redisAdapter && this.redisInitialized) {
                 invalidatedCount = await this.redisAdapter.deletePattern(pattern);
+                // Broadcast to other instances
+                await this.redisAdapter.broadcastInvalidation({ type: 'model', target: modelName });
             } else if (this.memoryCache) {
                 invalidatedCount = this.memoryCache.invalidateModel(modelName);
             }
+
+            this.recordModelInvalidation(modelName);
 
             if (this.config.debug && invalidatedCount > 0) {
                 console.log(
@@ -781,95 +826,81 @@ export class UnifiedCache {
             await this.ensureRedisReady(5000);
         }
 
+        const avgRetrievalTimeMs = this.retrievalTimes.length > 0
+            ? +(this.retrievalTimes.reduce((a, b) => a + b, 0) / this.retrievalTimes.length).toFixed(4)
+            : 0;
+
+        const topCachedModels = Array.from(this.modelHits.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([model, hits]) => ({ model, hits }));
+
+        const topInvalidatedModels = Array.from(this.modelInvalidations.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([model, count]) => ({ model, count }));
+
         // Check if we're actually using Redis and it's initialized
         if (this.useRedis && this.redisAdapter && this.redisInitialized) {
             try {
-                const redisStats = this.redisAdapter.getStats();
+                const redisStats = (this.redisAdapter as any).getStats();
                 const memoryInfo = await this.redisAdapter.getMemoryInfo();
                 const processMemory = MemoryMonitor.getMemoryReport();
-                
-                // Build comprehensive stats object for Redis backend
+
                 return {
-                    // Cache identification
                     cacheType: 'redis',
-                    
-                    // Redis connection status
                     redisConnected: redisStats.connected,
                     redisMemoryUsageMB: +(memoryInfo.used / 1048576).toFixed(2),
                     redisMaxMemoryMB: memoryInfo.max > 0 ? +(memoryInfo.max / 1048576).toFixed(2) : 30,
-                    
-                    // Hit/miss metrics (from RedisAdapter)
                     hits: redisStats.hits || 0,
                     misses: redisStats.misses || 0,
                     hitRate: +(redisStats.hitRate || 0).toFixed(2),
-                    
-                    // Cache size metrics
-                    keys: 0, // Would require DBSIZE call - deferred for performance
+                    keys: 0,
                     cachedDataMB: +(memoryInfo.used / 1048576).toFixed(2),
                     avgItemSizeMB: 0,
                     memoryUtilization: memoryInfo.max > 0 ? +((memoryInfo.used / memoryInfo.max) * 100).toFixed(2) : 0,
-                    
-                    // Eviction and invalidation
-                    evictions: 0, // Not tracked separately in Redis adapter
-                    invalidations: 0, // Tracked at query level
+                    evictions: 0,
+                    invalidations: this.modelInvalidations.size,
                     underMemoryPressure: redisStats.underMemoryPressure || false,
-                    
-                    // Configuration snapshot
                     maxKeys: this.config.maxKeys,
                     maxItemSizeMB: this.config.maxItemSizeMB,
                     ttlSeconds: this.config.ttl,
                     smartInvalidation: this.config.enableSmartInvalidation,
-                    
-                    // Process memory (via Unified MemoryMonitor)
                     heapUsedMB: +(processMemory.heapUsed / 1048576).toFixed(2),
                     heapTotalMB: +(processMemory.heapTotal / 1048576).toFixed(2),
                     rssMemoryMB: +(processMemory.rss / 1048576).toFixed(2),
+                    avgRetrievalTimeMs,
+                    topCachedModels,
+                    topInvalidatedModels,
+                    distributedSignalCount: (this.redisAdapter as any).distributedSignalCount
                 } as CacheStats;
-                
             } catch (error: any) {
-                if (this.config.debug) {
-                    console.error('[Cache] Error getting Redis stats:', error.message);
-                }
-                
-                // Return error state - DON'T fall back to memory stats
-                // This preserves data integrity and signals to caller that Redis is down
                 return {
                     cacheType: 'redis',
                     redisConnected: false,
-                    hits: 0,
-                    misses: 0,
-                    hitRate: 0,
-                    keys: 0,
-                    cachedDataMB: 0,
-                    avgItemSizeMB: 0,
-                    maxKeys: this.config.maxKeys,
-                    maxItemSizeMB: this.config.maxItemSizeMB,
-                    ttlSeconds: this.config.ttl,
-                    evictions: 0,
-                    memoryUtilization: 0,
-                    underMemoryPressure: false,
-                    smartInvalidation: this.config.enableSmartInvalidation,
+                    hits: 0, misses: 0, hitRate: 0, keys: 0, cachedDataMB: 0, avgItemSizeMB: 0,
+                    maxKeys: this.config.maxKeys, maxItemSizeMB: this.config.maxItemSizeMB,
+                    ttlSeconds: this.config.ttl, evictions: 0, memoryUtilization: 0,
+                    underMemoryPressure: false, smartInvalidation: this.config.enableSmartInvalidation,
+                    avgRetrievalTimeMs, topCachedModels, topInvalidatedModels
                 } as CacheStats;
             }
         }
 
-        // Return memory cache stats (and add process memory info)
-        // This path is taken when:
-        // - Redis is not configured
-        // - Redis initialization failed
-        // - Redis is temporarily unavailable
         const memoryStats = this.memoryCache.getStats();
-        
-        // Supplement with process memory info for consistency
         const processMemory = MemoryMonitor.getMemoryReport();
-        
+
         return {
             ...memoryStats,
             heapUsedMB: +(processMemory.heapUsed / 1048576).toFixed(2),
             heapTotalMB: +(processMemory.heapTotal / 1048576).toFixed(2),
             rssMemoryMB: +(processMemory.rss / 1048576).toFixed(2),
+            avgRetrievalTimeMs,
+            topCachedModels,
+            topInvalidatedModels
         } as CacheStats;
     }
+
 
     /**
      * Disconnect from cache backends
