@@ -3,6 +3,7 @@ import { HyperHashMap } from '../hyperhashmap';
 import { CacheConfig, CacheEntry, IndexEntry } from '../config';
 import { SizeCalculator } from '../SizeCalculator';
 import { DocumentSerializer } from '../documentSerializer';
+import { MemoryMonitor } from '../MemoryMonitor';
 
 /**
  * Memory cache with threshold-based eviction
@@ -59,6 +60,7 @@ export class MemoryCache extends EventEmitter {
         this.startMemoryMonitoring(); // watch memory pressure and trigger eviction
 
         if (this.debugMode) {
+            console.log('[MemoryCache] Initialized with threshold:', this.config.memoryDropThreshold + '%');
             // Stats logging is verbose; enabled only in debug mode to
             // avoid noisy logs in production.
             this.startStatsLogging();
@@ -73,20 +75,15 @@ export class MemoryCache extends EventEmitter {
      * Works with both Node.js and Bun
      */
     private calculateMaxSize(): void {
-        const memUsage = process.memoryUsage();
-        
-        // Node.js has heapTotal; Bun uses rss for memory tracking
-        const totalMemory = memUsage.heapTotal || memUsage.rss || 0;
+        const totalAvailable = MemoryMonitor.getHeapLimit();
         
         // Use threshold percentage of available memory
-        this.maxSizeBytes = Math.floor(totalMemory * (this.config.memoryDropThreshold / 100));
+        this.maxSizeBytes = Math.floor(totalAvailable * (this.config.memoryDropThreshold / 100));
         
-        // Helpful debug output for teams to understand configured target
         if (this.debugMode) {
-            const runtimeName = memUsage.heapTotal ? 'Node.js' : 'Bun';
             console.log(
-                `Memory cache target: ${(this.maxSizeBytes / 1048576).toFixed(2)}MB ` +
-                `(${this.config.memoryDropThreshold}% of ${(totalMemory / 1048576).toFixed(2)}MB [${runtimeName}])`
+                `[MemoryCache] Component Target: ${(this.maxSizeBytes / 1048576).toFixed(2)}MB ` +
+                `(${this.config.memoryDropThreshold}% of ${(totalAvailable / 1048576).toFixed(2)}MB limit)`
             );
         }
     }
@@ -105,23 +102,33 @@ export class MemoryCache extends EventEmitter {
      */
     private startMemoryMonitoring(): void {
         this.memoryCheckTimer = setInterval(() => {
-            const threshold = this.config.memoryDropThreshold;
-            // Protect against division by zero if maxSizeBytes not set
-            const usagePercent = this.maxSizeBytes > 0 ? (this.currentSize / this.maxSizeBytes) * 100 : 0;
+            const dropThreshold = this.config.memoryDropThreshold;
+            const processThreshold = this.config.memoryThreshold;
+            
+            // 1. Internal size check (relative to its own target)
+            const internalUsagePercent = this.maxSizeBytes > 0 ? (this.currentSize / this.maxSizeBytes) * 100 : 0;
+            
+            // 2. Global process heap check (the library's circuit breaker)
+            const heapUtilization = MemoryMonitor.getHeapUtilization();
+            
+            const isInternalPressure = internalUsagePercent >= dropThreshold;
+            const isProcessPressure = heapUtilization >= processThreshold;
 
-            if (usagePercent >= threshold) {
+            if (isInternalPressure || isProcessPressure) {
                 this.isUnderMemoryPressure = true;
                 
                 this.emit('memory-pressure', {
                     current: this.currentSize,
                     max: this.maxSizeBytes,
-                    percentage: usagePercent
+                    internalPercentage: internalUsagePercent,
+                    processPercentage: heapUtilization,
+                    source: isProcessPressure ? 'process' : 'internal'
                 });
 
                 if (this.debugMode) {
                     console.warn(
-                        `Memory cache pressure: ${usagePercent.toFixed(1)}% ` +
-                        `(threshold: ${threshold}%)`
+                        `[MemoryCache] PRESSURE: Internal ${internalUsagePercent.toFixed(1)}% | ` +
+                        `Process ${heapUtilization.toFixed(1)}% (Thresholds: ${dropThreshold}% / ${processThreshold}%)`
                     );
                 }
 
@@ -135,10 +142,8 @@ export class MemoryCache extends EventEmitter {
                         this.evictToTarget();
                     });
                 }
-            } else if (usagePercent >= threshold * 0.9) {
+            } else if (internalUsagePercent >= dropThreshold * 0.9 || heapUtilization >= processThreshold * 0.9) {
                 // Approaching threshold, do preventive eviction
-                // Free a small fraction to head off sudden spikes. Use setImmediate
-                // to avoid blocking the current event loop tick.
                 setImmediate(() => {
                     this.evictLRU(Math.floor(this.maxSizeBytes * 0.05)); // Free 5%
                 });

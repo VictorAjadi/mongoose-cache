@@ -168,7 +168,7 @@ export class SizeCalculator {
         }
 
         // Buffer - use BINARY_OVERHEAD constant
-        if (Buffer.isBuffer(value)) {
+        if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) {
             return this.calculateBinarySize(value.length, isRoot, fieldName);
         }
 

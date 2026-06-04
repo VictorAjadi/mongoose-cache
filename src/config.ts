@@ -1,4 +1,5 @@
 export type CacheConfig = {
+    enabled?: boolean; // Enable/disable the cache system
     debug?: boolean; // Enable debug logging
     maxKeys?: number; // Maximum number of cache keys to store
     ttl?: number; // Time-to-live in seconds
@@ -58,6 +59,7 @@ export interface CacheStats {
 }
 
 export const DEFAULT_CONFIG: Required<CacheConfig> = {
+    enabled: true,
     debug: false,
     maxKeys: 10000,
     ttl: 300,
@@ -66,7 +68,7 @@ export const DEFAULT_CONFIG: Required<CacheConfig> = {
     useCryptoHash: false,
     redisDropThreshold: 85,
     memoryDropThreshold: 80,
-    memoryThreshold: 60,
+    memoryThreshold: 90,
     redis: {
         host: 'localhost',
         port: 6379,

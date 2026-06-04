@@ -3,6 +3,7 @@ import { EventEmitter } from 'events';
 import { CacheConfig, CacheEntry } from '../config';
 import { SizeCalculator } from '../SizeCalculator';
 import { DocumentSerializer } from '../documentSerializer';
+import { MemoryMonitor } from '../MemoryMonitor';
 /**
  * Redis adapter with robust connection handling.
  */
@@ -19,19 +20,19 @@ export class RedisAdapter extends EventEmitter {
     private readOperations: number = 0;
     private writeOperations: number = 0;
     
-    private memoryCheckInterval?: NodeJS.Timeout;
+    private memoryCheckInterval?: ReturnType<typeof setInterval>;
     private reconnectAttempts: number = 0;
     private readonly MAX_RECONNECT_ATTEMPTS = 10;
     
     // Connection health monitoring
     private lastSuccessfulOperation: number = Date.now();
-    private healthCheckInterval?: NodeJS.Timeout;
+    private healthCheckInterval?: ReturnType<typeof setInterval>;
     private readonly HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
     private readonly OPERATION_TIMEOUT = 60000; // 60 seconds of no successful operations triggers reconnect
 
     // Batch write queue
     private writeQueue: Map<string, { value: any; ttl: number; timestamp: number }> = new Map();
-    private writeTimer?: NodeJS.Timeout;
+    private writeTimer?: ReturnType<typeof setInterval>;
     private readonly WRITE_BATCH_INTERVAL = 50;
     private readonly MAX_BATCH_SIZE = 100;
 
@@ -311,7 +312,7 @@ export class RedisAdapter extends EventEmitter {
                     this.lastSuccessfulOperation = Date.now();
                     
                     if (this.debugMode) {
-                        console.log('Redis connected successfully');
+                        console.log('[RedisAdapter] Connected successfully');
                     }
                     
                     resolve();
@@ -440,17 +441,27 @@ export class RedisAdapter extends EventEmitter {
         this.memoryCheckInterval = setInterval(async () => {
             try {
                 const info = await this.getMemoryInfo();
-                const threshold = this.config.redisDropThreshold;
+                const redisThreshold = this.config.redisDropThreshold;
+                const processThreshold = this.config.memoryThreshold;
+                
+                const heapUtilization = MemoryMonitor.getHeapUtilization();
+                
+                const isRedisPressure = info.usagePercentage >= redisThreshold;
+                const isProcessPressure = heapUtilization >= processThreshold;
 
-                if (info.usagePercentage >= threshold) {
+                if (isRedisPressure || isProcessPressure) {
                     this.isUnderMemoryPressure = true;
                     
-                    this.emit('memory-pressure', info);
+                    this.emit('memory-pressure', {
+                        ...info,
+                        processPercentage: heapUtilization,
+                        source: isProcessPressure ? 'process' : 'redis'
+                    });
                     
                     if (this.debugMode) {
                         console.warn(
-                            `Redis memory: ${info.usagePercentage.toFixed(1)}% ` +
-                            `(threshold: ${threshold}%)`
+                            `[RedisAdapter] PRESSURE: Redis ${info.usagePercentage.toFixed(1)}% | ` +
+                            `Process ${heapUtilization.toFixed(1)}% (Thresholds: ${redisThreshold}% / ${processThreshold}%)`
                         );
                     }
                     

@@ -27,6 +27,7 @@ import { CacheConfig, CacheStats, DEFAULT_CONFIG } from '../config';
 import { MemoryCache } from './MemoryCache';
 import { RedisAdapter } from '../adapters/RedisAdapter';
 import PipelineHashGenerator from '../PipelineHashGenerator';
+import { MemoryMonitor } from '../MemoryMonitor';
 
 /**
  * UnifiedCache - Main cache orchestration class
@@ -79,7 +80,8 @@ export class UnifiedCache {
 
         if (this.config.debug) {
             const strategy = this.useRedis ? 'Redis (with memory fallback)' : 'Memory only';
-            console.log(`Cache initialized with strategy: ${strategy}`);
+            console.log(`[UnifiedCache] Initialized with strategy: ${strategy}`);
+            console.log(`[UnifiedCache] Memory Threshold: ${this.config.memoryThreshold}%`);
         }
     }
 
@@ -794,7 +796,7 @@ export class UnifiedCache {
             try {
                 const redisStats = this.redisAdapter.getStats();
                 const memoryInfo = await this.redisAdapter.getMemoryInfo();
-                const processMemory = process.memoryUsage();
+                const processMemory = MemoryMonitor.getMemoryReport();
                 
                 // Build comprehensive stats object for Redis backend
                 return {
@@ -828,7 +830,7 @@ export class UnifiedCache {
                     ttlSeconds: this.config.ttl,
                     smartInvalidation: this.config.enableSmartInvalidation,
                     
-                    // Process memory (Node.js/Bun compatible)
+                    // Process memory (via Unified MemoryMonitor)
                     heapUsedMB: +(processMemory.heapUsed / 1048576).toFixed(2),
                     heapTotalMB: +(processMemory.heapTotal / 1048576).toFixed(2),
                     rssMemoryMB: +(processMemory.rss / 1048576).toFixed(2),
@@ -869,8 +871,7 @@ export class UnifiedCache {
         const memoryStats = this.memoryCache.getStats();
         
         // Supplement with process memory info for consistency
-        // Note: process.memoryUsage() is available in both Node.js and Bun
-        const processMemory = process.memoryUsage();
+        const processMemory = MemoryMonitor.getMemoryReport();
         
         return {
             ...memoryStats,
