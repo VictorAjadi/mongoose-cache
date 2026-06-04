@@ -32,7 +32,7 @@ interface CacheMissContext {
     shouldSkipEmpty?: boolean;
     enableSmartInvalidation?: boolean;
     debugMode?: boolean;
-    updateCacheInBackground: (key: string, doc: any, ttl?: number) => void;
+    updateCacheInBackground: (key: string, doc: any, ttl?: number, isLean?: boolean) => void;
     toPlainObject: (doc: any) => any;
     isLean?: boolean;
 }
@@ -95,6 +95,8 @@ export class MongooseCache {
 
     private updateQueue: Map<string, BulkUpdateEntry[]>;
     private inflightQueries: Map<string, Promise<any>>;
+    private lastOp: string = '';
+    private lastQueryObject: any = null;
     private bulkFlushTimer?: ReturnType<typeof setInterval>;
     private readonly BULK_FLUSH_INTERVAL: number = 50;
     private isDisconnecting: boolean = false;
@@ -256,6 +258,8 @@ export class MongooseCache {
 
             // Atomic batch write - let UnifiedCache pick the right backend
             if (entries.size > 0) {
+                // Batch writes from queue are typically non-lean or mixed, 
+                // we treat as non-lean for safety during bulk recovery.
                 const written: number = await this.cache.mset(entries);
 
                 if (this.debugMode && entries.size > 10) {
@@ -285,8 +289,9 @@ export class MongooseCache {
      * @param key - Cache key to update
      * @param doc - Document/value to cache
      * @param ttl - Optional time-to-live (uses config default if omitted)
+     * @param isLean - Whether this is a lean result (enables memory fast-path)
      */
-    private updateCacheInBackground(key: string, doc: any, ttl?: number): void {
+    private updateCacheInBackground(key: string, doc: any, ttl?: number, isLean: boolean = false): void {
         if (this.isDisconnecting) return;
 
         // Circuit breaker: Detect memory pressure and force immediate flush
@@ -315,6 +320,10 @@ export class MongooseCache {
             doc,
             timestamp: Date.now()
         });
+
+        // Optimization: For single-entry non-batched updates, we can pass isLean
+        // But for consistency and since flushBulkUpdates is the main path, 
+        // we'll handle the hit-path optimization in handleCacheMiss specifically.
 
         // Safety valve: Force flush if too many pending keys (prevents queue explosion)
         if (this.updateQueue.size > 100) {
@@ -421,12 +430,26 @@ export class MongooseCache {
 
     private generateCacheKey(modelName: string, operation: string, context: any): string {
         // FAST PATH 1: Simple ID queries (very common)
-        if (operation.includes('find') && context.query && context.query._id && Object.keys(context.query).length === 1 && !context.populate) {
-            return `${modelName}:${operation}:id:${String(context.query._id)}`;
+        const query = context.query || {};
+        const id = query._id ? (typeof query._id === 'string' ? query._id : (query._id.toHexString ? query._id.toHexString() : String(query._id))) : null;
+
+        if (operation.includes('find') && id && Object.keys(query).length === 1 && !context.populate) {
+            return `${modelName}:${operation}:id:${id}`;
         }
 
-        // FAST PATH 2: Identity-based memoization (skips expensive logic if exactly same context)
-        if (context === this.lastQueryKeyData && context !== undefined) return this.lastGeneratedKey;
+        // FAST PATH 2: String-based memoization
+        // Use a faster check if it's the exact same query object first
+        if (context.query === this.lastQueryObject && context.query !== undefined && operation === this.lastOp) {
+            return this.lastGeneratedKey;
+        }
+
+        const queryStr = id || (query ? JSON.stringify(query) : '');
+        const popStr = context.populate ? (typeof context.populate === 'string' ? context.populate : 'complex') : '';
+        const memoKey = `${operation}:${queryStr}:${popStr}`;
+
+        if (memoKey === this.lastQueryKeyData && operation === this.lastOp) {
+            return this.lastGeneratedKey;
+        }
 
         const modifiers = ['query', 'projection', 'sort', 'limit', 'skip', 'populate', 'options', 'pipeline', 'distinct'];
         const keyData: any = { model: modelName, op: operation };
@@ -455,7 +478,9 @@ export class MongooseCache {
             }
         }
 
-        this.lastQueryKeyData = context;
+        this.lastQueryObject = context.query;
+        this.lastQueryKeyData = memoKey;
+        this.lastOp = operation;
         this.lastGeneratedKey = this.cache.generateKey(modelName, operation, keyData);
         return this.lastGeneratedKey;
     }
@@ -486,7 +511,7 @@ export class MongooseCache {
 
                 if (shouldCache && cacheKey && modelName) {
                     const dataToCache: any = toPlainObject(result);
-                    updateCacheInBackground(cacheKey, dataToCache);
+                    updateCacheInBackground(cacheKey, dataToCache, undefined, context.isLean);
 
                     if (enableSmartInvalidation) {
                         this.cache.addToIndexes(cacheKey, modelName, originalQuery);
@@ -841,7 +866,7 @@ export class MongooseCache {
 
                 const modelName = this.model.modelName;
                 const operation = (this as any).op;
-                
+
                 // Build cache key using raw internal properties
                 const cacheKey = generateCacheKey(modelName, operation, {
                     query: (this as any)._conditions,
@@ -999,7 +1024,7 @@ export class MongooseCache {
                 setImmediate(() => {
                     try {
                         const dataToCache = toPlainObject(result || []);
-                        updateCacheInBackground(cacheKey, dataToCache);
+                        updateCacheInBackground(cacheKey, dataToCache, undefined, true);
                         if (isSmartInvalidation) cache.addToIndexes(cacheKey, modelName, pipeline);
                     } catch (err) {
                         if (self.debugMode) console.warn('Aggregate post-hook error:', err);
@@ -1068,7 +1093,7 @@ export class MongooseCache {
 
             const cacheKey = (this as any)._cacheKey;
             if (cacheKey && result !== undefined && result !== null) {
-                updateCacheInBackground(cacheKey, result);
+                updateCacheInBackground(cacheKey, result, undefined, true);
             }
 
             return result;
@@ -1127,7 +1152,7 @@ export class MongooseCache {
 
             const cacheKey = (this as any)._cacheKey;
             if (cacheKey && result) {
-                updateCacheInBackground(cacheKey, result);
+                updateCacheInBackground(cacheKey, result, undefined, true);
             }
 
             return result;

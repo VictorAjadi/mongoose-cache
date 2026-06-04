@@ -302,7 +302,7 @@ export class UnifiedCache {
      * @param ttl - Time-to-live in seconds (uses config default if omitted)
      * @returns true if set successful, false on error
      */
-    public async set(key: string, value: any, ttl?: number): Promise<boolean> {
+    public async set(key: string, value: any, ttl?: number, isLean: boolean = false): Promise<boolean> {
         // Ensure Redis is ready before first use (non-blocking wait)
         if (this.useRedis && !this.redisInitialized) {
             await this.ensureRedisReady(5000);
@@ -317,17 +317,12 @@ export class UnifiedCache {
                 // Only fall back if Redis is truly disconnected
                 if (!result) {
                     const stats = this.redisAdapter?.getStats();
-                    if (!stats?.connected) {
-                        if (this.config.debug) {
-                            console.warn('[Cache] Redis unavailable for SET, using memory cache');
-                        }
-                        return this.memoryCache.set(key, value, ttl);
-                    }
+                    if (!stats?.connected) return this.memoryCache.set(key, value, ttl, isLean);
                 }
                 
                 return result;
             } else {
-                return cache.set(key, value, ttl);
+                return cache.set(key, value, ttl, isLean);
             }
         } catch (error: any) {
             if (this.config.debug) {
@@ -358,34 +353,42 @@ export class UnifiedCache {
             await this.ensureRedisReady(5000);
         }
 
-        try {
-            const cache = this.getActiveCache();
+        const cache = this.getActiveCache();
 
+        // FAST PATH: Memory hit returning immediately
+        if (cache instanceof MemoryCache) {
+            const result = cache.get<T>(key);
+            // Record hit model in background - use process.nextTick for even lower latency than setImmediate
+            if (result !== null) {
+                process.nextTick(() => {
+                    const model = key.substring(0, key.indexOf(':'));
+                    if (model) this.recordModelHit(model);
+                });
+            }
+            return result;
+        }
+
+        try {
             if (cache instanceof RedisAdapter) {
                 const startTime = performance.now();
                 const result = await cache.get<T>(key);
-                const duration = performance.now() - startTime;
-                this.recordRetrievalTime(duration);
                 
-                // Track top cached models from key structure
-                const model = key.split(':')[0];
-                if (model) this.recordModelHit(model);
+                // Track metrics in background
+                setImmediate(() => {
+                    const duration = performance.now() - startTime;
+                    this.recordRetrievalTime(duration);
+                    const model = key.substring(0, key.indexOf(':'));
+                    if (model) this.recordModelHit(model);
+                });
 
-                // Only fall back if Redis is truly disconnected AND result is null
                 if (result === null) {
-                    const stats = this.redisAdapter?.getStats();
-                    if (!stats?.connected) {
-                        if (this.config.debug) {
-                            console.warn('[Cache] Redis unavailable for GET, checking memory cache');
-                        }
-                        return this.memoryCache.get<T>(key);
-                    }
+                    const stats = (this.redisAdapter as any).getStats();
+                    if (!stats?.connected) return this.memoryCache.get<T>(key);
                 }
-                
                 return result;
-            } else {
-                return cache.get<T>(key);
             }
+            // Fallback for any other adapter type
+            return (cache as any).get(key);
         } catch (error: any) {
             if (this.config.debug) {
                 console.error('[Cache] GET error:', error.message);
