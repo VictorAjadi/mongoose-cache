@@ -29,11 +29,12 @@ interface CacheMissContext {
     cacheKey: string;
     modelName: string;
     originalQuery: any;
-    shouldSkipEmpty: boolean;
-    enableSmartInvalidation: boolean;
-    debugMode: boolean;
+    shouldSkipEmpty?: boolean;
+    enableSmartInvalidation?: boolean;
+    debugMode?: boolean;
     updateCacheInBackground: (key: string, doc: any, ttl?: number) => void;
     toPlainObject: (doc: any) => any;
+    isLean?: boolean;
 }
 
 interface UpdateResult {
@@ -91,19 +92,21 @@ export class MongooseCache {
     private cache: UnifiedCache;
     public config: Required<CacheConfig>;
     private debugMode: boolean;
-    
+
     private updateQueue: Map<string, BulkUpdateEntry[]>;
+    private inflightQueries: Map<string, Promise<any>>;
     private bulkFlushTimer?: ReturnType<typeof setInterval>;
     private readonly BULK_FLUSH_INTERVAL: number = 50;
     private isDisconnecting: boolean = false;
     private memoryCheckTimer?: ReturnType<typeof setInterval>;
 
     constructor(config: CacheConfig = {}) {
-        this.config =  { ...DEFAULT_CONFIG, ...config } as Required<CacheConfig>;
+        this.config = { ...DEFAULT_CONFIG, ...config } as Required<CacheConfig>;
         this.debugMode = this.config.debug;
         this.cache = new UnifiedCache(this.config);
         this.updateQueue = new Map<string, BulkUpdateEntry[]>();
-        
+        this.inflightQueries = new Map<string, Promise<any>>();
+
         this.startBulkFlushTimer();
         this.startMemoryMonitoring();
 
@@ -119,14 +122,14 @@ export class MongooseCache {
     private setupGracefulShutdown(): void {
         const shutdownHandler = async (signal: string): Promise<void> => {
             if (this.isDisconnecting) return;
-            
+
             this.isDisconnecting = true;
             if (this.debugMode) {
                 console.log(`[Shutdown] Received ${signal}, gracefully disconnecting cache...`);
             }
-            
+
             await this.disconnect();
-            
+
             // Runtime-safe exit: Node.js-only process.exit() wrapped in try-catch
             try {
                 if (typeof process !== 'undefined' && process.version?.startsWith?.('v')) {
@@ -141,7 +144,7 @@ export class MongooseCache {
             process.on('SIGINT', () => shutdownHandler('SIGINT'));
             process.on('SIGTERM', () => shutdownHandler('SIGTERM'));
             process.on('SIGUSR2', () => shutdownHandler('SIGUSR2'));
-            
+
             if (this.debugMode) {
                 console.log('[MongooseCache] Signal handlers registered');
             }
@@ -193,12 +196,12 @@ export class MongooseCache {
                 }
 
                 setImmediate(() => {
-                    this.flushBulkUpdates().catch(() => {});
+                    this.flushBulkUpdates().catch(() => { });
                 });
             }
         }, 5000);
     }
-    
+
     /**
      * @deprecated Use MemoryMonitor.getHeapLimit directly if needed
      */
@@ -241,10 +244,10 @@ export class MongooseCache {
         try {
             // Deduplicate: keep only the latest update for each key (5s window)
             for (const [key, updates] of this.updateQueue.entries()) {
-                const validUpdates: BulkUpdateEntry[] = updates.filter((u: BulkUpdateEntry): boolean => 
+                const validUpdates: BulkUpdateEntry[] = updates.filter((u: BulkUpdateEntry): boolean =>
                     now - u.timestamp < 5000
                 );
-                
+
                 if (validUpdates.length > 0) {
                     const latestDoc: any = validUpdates[validUpdates.length - 1].doc;
                     entries.set(key, { value: latestDoc, ttl: this.config.ttl });
@@ -254,7 +257,7 @@ export class MongooseCache {
             // Atomic batch write - let UnifiedCache pick the right backend
             if (entries.size > 0) {
                 const written: number = await this.cache.mset(entries);
-                
+
                 if (this.debugMode && entries.size > 10) {
                     console.log(`[Batch Flush] Wrote ${written}/${entries.size} entries to backend`);
                 }
@@ -296,9 +299,9 @@ export class MongooseCache {
 
             // Force immediate flush to free memory
             setImmediate(() => {
-                this.flushBulkUpdates().catch(() => {});
+                this.flushBulkUpdates().catch(() => { });
             });
-            
+
             return;
         }
 
@@ -306,7 +309,7 @@ export class MongooseCache {
         if (!this.updateQueue.has(key)) {
             this.updateQueue.set(key, []);
         }
-        
+
         // Queue update with timestamp for deduplication during flush
         this.updateQueue.get(key)!.push({
             doc,
@@ -325,17 +328,12 @@ export class MongooseCache {
         }
     }
 
-    /**
-     * Convert Mongoose documents to plain serializable objects
-     * 
-     * Delegates to DocumentSerializer for consistent BSON handling across the app.
-     * DocumentSerializer handles: ObjectIds, Dates, Buffers, Decimal128, nested objects,
-     * Mongoose document metadata stripping, and circular reference detection.
-     * 
-     */
     private toPlainObject(doc: any): any {
         try {
-            return DocumentSerializer.serialize(doc);
+            // DocumentSerializer now returns { data, size }
+            // We only need the data here for internal Mongoose processing
+            const result = DocumentSerializer.serialize(doc);
+            return result.data;
         } catch (error) {
             if (this.debugMode) {
                 console.warn('[Serialization] DocumentSerializer failed, returning raw:', error);
@@ -344,6 +342,7 @@ export class MongooseCache {
             return doc;
         }
     }
+
 
     /**
      * Convert plain cached objects back to Mongoose documents
@@ -361,7 +360,7 @@ export class MongooseCache {
      */
     private toMongooseDocument(model: any, data: any): any {
         if (!data) return data;
-        
+
         // Fast path for arrays - pre-allocate full size
         if (Array.isArray(data)) {
             const len = data.length;
@@ -382,17 +381,17 @@ export class MongooseCache {
             // Create document with minimal overhead:
             // - defaults: false skips expensive validation logic
             // - minimize: false preserves structure
-            const doc = new model(data, undefined, { 
+            const doc = new model(data, undefined, {
                 defaults: false,
-                minimize: false 
+                minimize: false
             });
-            
+
             // Efficiently restore _id and mark as persisted
             if (data._id) {
                 doc._id = data._id;
                 doc.isNew = false;
             }
-            
+
             // init() is expensive but required to enable virtuals and getters
             doc.init(data);
 
@@ -416,19 +415,51 @@ export class MongooseCache {
      * 
      * This is called from pre-hooks to generate keys before cache lookups.
      */
+    // Internal memoization for key generation to prevent redundant hashing
+    private lastQueryKeyData: string = '';
+    private lastGeneratedKey: string = '';
+
     private generateCacheKey(modelName: string, operation: string, context: any): string {
-        const keyData: any = {
-            model: modelName,
-            op: operation
-        };
+        // FAST PATH 1: Simple ID queries (very common)
+        if (operation.includes('find') && context.query && context.query._id && Object.keys(context.query).length === 1 && !context.populate) {
+            return `${modelName}:${operation}:id:${String(context.query._id)}`;
+        }
 
-        // Only include non-empty query components to reduce key size
-        if (context.query && Object.keys(context.query).length > 0) keyData.query = context.query;
-        if (context.projection && Object.keys(context.projection).length > 0) keyData.projection = context.projection;
-        if (context.sort && Object.keys(context.sort).length > 0) keyData.sort = context.sort;
+        // FAST PATH 2: Identity-based memoization (skips expensive logic if exactly same context)
+        if (context === this.lastQueryKeyData && context !== undefined) return this.lastGeneratedKey;
 
-        return this.cache.generateKey(modelName, operation, keyData);
+        const modifiers = ['query', 'projection', 'sort', 'limit', 'skip', 'populate', 'options', 'pipeline', 'distinct'];
+        const keyData: any = { model: modelName, op: operation };
+
+        for (const mod of modifiers) {
+            const value = context[mod];
+            if (value === undefined || value === null) continue;
+
+            if (mod === 'populate') {
+                // Recursively extract paths to avoid stringifying heavy Mongoose internal objects
+                const extractPaths = (p: any): string => {
+                    if (!p) return '';
+                    const base = p.path || p;
+                    if (p.populate) {
+                        const sub = Array.isArray(p.populate) ? p.populate.map(extractPaths).join(',') : extractPaths(p.populate);
+                        return `${base}{${sub}}`;
+                    }
+                    return String(base);
+                };
+                const popArray = Array.isArray(value) ? value : [value];
+                keyData[mod] = popArray.map(extractPaths).join('|');
+            } else if (mod === 'options') {
+                keyData[mod] = { lean: !!value.lean, limit: value.limit };
+            } else {
+                keyData[mod] = value;
+            }
+        }
+
+        this.lastQueryKeyData = context;
+        this.lastGeneratedKey = this.cache.generateKey(modelName, operation, keyData);
+        return this.lastGeneratedKey;
     }
+
 
     /**
      * Handle cache miss by queuing the result for caching
@@ -441,49 +472,39 @@ export class MongooseCache {
      * fine-grained cache invalidation later based on query patterns.
      */
     private handleCacheMiss(result: any, context: CacheMissContext): void {
-        const { 
-            cacheKey, modelName, originalQuery, shouldSkipEmpty, 
-            enableSmartInvalidation, debugMode, updateCacheInBackground, toPlainObject 
+        const {
+            cacheKey, modelName, originalQuery, shouldSkipEmpty,
+            enableSmartInvalidation, debugMode, updateCacheInBackground, toPlainObject
         } = context;
 
-        try {
-            // Skip caching empty results if configured
-            const shouldCache: boolean = !shouldSkipEmpty || (
-                result && 
-                (Array.isArray(result) ? result.length > 0 : result !== null)
-            );
-            
-            if (shouldCache && cacheKey && modelName) {
-                // Serialize and queue for batch writing
-                const dataToCache: any = toPlainObject(result);
-                updateCacheInBackground(cacheKey, dataToCache);
-                
-                // Register with smart invalidation indexes for targeted cache busts
-                if (enableSmartInvalidation) {
-                    this.cache.addToIndexes(cacheKey, modelName, originalQuery);
-                }
-                
-                // Only log large result sets to reduce debug noise
-                if (debugMode) {
-                    const count: number = Array.isArray(dataToCache) ? dataToCache.length : 1;
-                    if (count > 50) {
-                        console.log(`[Cache Queued] ${modelName} ${originalQuery?.constructor?.name || 'query'} (${count} items)`);
+        // ZERO-LATENCY: Entire miss logic moved to next tick to unblock response
+        setImmediate(() => {
+            try {
+                const shouldCache: boolean = !shouldSkipEmpty || (
+                    result && (Array.isArray(result) ? result.length > 0 : result !== null)
+                );
+
+                if (shouldCache && cacheKey && modelName) {
+                    const dataToCache: any = toPlainObject(result);
+                    updateCacheInBackground(cacheKey, dataToCache);
+
+                    if (enableSmartInvalidation) {
+                        this.cache.addToIndexes(cacheKey, modelName, originalQuery);
                     }
                 }
+            } catch (err) {
+                if (debugMode) console.warn('[Cache Background] Miss processing failed:', err);
             }
-        } catch (error) {
-            if (debugMode) {
-                console.warn('[Cache Miss Handler] Error processing cache miss:', error);
-            }
-        }
+        });
+
     }
 
     // Non-blocking background cache updates with deduplication
     public updateCachedData(
-        modelName: string, 
-        operation: string, 
-        query: any, 
-        updateData: any, 
+        modelName: string,
+        operation: string,
+        query: any,
+        updateData: any,
         resultDoc?: any
     ): void {
         //Return immediately - run everything in background
@@ -497,7 +518,7 @@ export class MongooseCache {
                 const fieldPaths: string[] = this.extractFieldPaths(modelName, query);
                 const keysToUpdate: Set<string> = new Set<string>();
                 const keysToDelete: Set<string> = new Set<string>();
-                
+
                 const patterns: string[] = [
                     `*${modelName}:*`,
                     ...fieldPaths.map((path: string): string => `*${path}*`)
@@ -505,7 +526,7 @@ export class MongooseCache {
 
                 // Parallel pattern matching
                 const patternResults: string[][] = await Promise.all(
-                    patterns.map((pattern: string): Promise<string[]> => 
+                    patterns.map((pattern: string): Promise<string[]> =>
                         this.cache.getKeysByPattern(pattern)
                     )
                 );
@@ -578,14 +599,14 @@ export class MongooseCache {
                                 console.warn(`Failed to process update for ${cacheKey}:`, error);
                             }
                             // Delete invalid entries
-                            this.cache.delete(cacheKey).catch(() => {});
+                            this.cache.delete(cacheKey).catch(() => { });
                         }
                     }
 
                     // Atomic batch write using mset
                     if (updateBatch.size > 0) {
                         const written = await this.cache.mset(updateBatch);
-                        
+
                         if (this.debugMode) {
                             console.log(
                                 `[Cache Update] Batch updated ${written}/${updateBatch.size} entries, ` +
@@ -603,10 +624,10 @@ export class MongooseCache {
     }
 
     private updateArrayCache(
-        cachedArray: any[], 
-        operation: string, 
-        query: any, 
-        updateData: any, 
+        cachedArray: any[],
+        operation: string,
+        query: any,
+        updateData: any,
         resultDoc?: any
     ): UpdateResult {
         let modified: boolean = false;
@@ -614,7 +635,7 @@ export class MongooseCache {
 
         if (operation === 'save' || operation === 'insertMany') {
             const newDocs: any[] = Array.isArray(resultDoc) ? resultDoc : [resultDoc];
-            
+
             for (const doc of cachedArray) {
                 newArray.push(doc);
             }
@@ -622,12 +643,12 @@ export class MongooseCache {
             for (const newDoc of newDocs) {
                 if (newDoc && OptimizedQueryMatcher.documentMatchesQuery(newDoc, query)) {
                     const normalizedDoc: any = MongoDocumentUtils.ensureMongoDocument(newDoc);
-                    
-                    const existingIndex: number = newArray.findIndex((doc: any): boolean => 
-                        doc._id && normalizedDoc._id && 
+
+                    const existingIndex: number = newArray.findIndex((doc: any): boolean =>
+                        doc._id && normalizedDoc._id &&
                         MongoDocumentUtils.compareIds(doc._id, normalizedDoc._id)
                     );
-                    
+
                     if (existingIndex >= 0) {
                         newArray[existingIndex] = normalizedDoc;
                         modified = true;
@@ -669,14 +690,14 @@ export class MongooseCache {
     }
 
     private updateSingleDocCache(
-        cachedDoc: any, 
-        operation: string, 
-        query: any, 
-        updateData: any, 
+        cachedDoc: any,
+        operation: string,
+        query: any,
+        updateData: any,
         resultDoc?: any
     ): UpdateResult {
         const normalizedDoc: any = MongoDocumentUtils.ensureMongoDocument(cachedDoc);
-        
+
         if (!OptimizedQueryMatcher.documentMatchesQuery(normalizedDoc, query)) {
             return { modified: false, data: normalizedDoc };
         }
@@ -684,9 +705,9 @@ export class MongooseCache {
         if (operation.includes('delete')) {
             return { modified: false, data: null };
         } else if (operation.includes('replace') && resultDoc) {
-            return { 
-                modified: true, 
-                data: MongoDocumentUtils.ensureMongoDocument(resultDoc) 
+            return {
+                modified: true,
+                data: MongoDocumentUtils.ensureMongoDocument(resultDoc)
             };
         } else if (operation.includes('update') || operation === 'save') {
             const dataToApply: any = resultDoc || updateData;
@@ -788,19 +809,21 @@ export class MongooseCache {
             console.log('[MongooseCache] Applying hooks to schema...');
         }
 
-        const { 
+        const {
             skipEmpty = true,
             enableSmartInvalidation = this.config.enableSmartInvalidation,
         } = options;
 
-        // Capture methods for closure in hook functions
+        const self = this;
+        const isSmartInvalidation = this.config.enableSmartInvalidation;
+        const ttl = this.config.ttl;
+
         const cache: UnifiedCache = this.cache;
-        const updateCacheInBackground: (key: string, doc: any, ttl?: number) => void = this.updateCacheInBackground.bind(this);
-        const debugMode: boolean = this.debugMode;
-        const toPlainObject: (doc: any) => any = this.toPlainObject.bind(this);
-        const toMongooseDocument: (model: any, data: any) => any = this.toMongooseDocument.bind(this);
-        const generateCacheKey: (modelName: string, operation: string, context: any) => string = this.generateCacheKey.bind(this);
-        const handleCacheMiss: (result: any, context: CacheMissContext) => void = this.handleCacheMiss.bind(this);
+        const updateCacheInBackground = this.updateCacheInBackground.bind(this);
+        const generateCacheKey = this.generateCacheKey.bind(this);
+        const toMongooseDocument = this.toMongooseDocument.bind(this);
+        const toPlainObject = this.toPlainObject.bind(this);
+        const inflightQueries = this.inflightQueries;
 
         /**
          * ===== FIND QUERIES =====
@@ -812,45 +835,37 @@ export class MongooseCache {
          */
         (schema.pre as any)(/^find/, async function (this: Query<any, any>): Promise<void> {
             try {
-                const queryOptions = this.getOptions();
-                
-                // Caching is now automatic unless explicitly disabled
+                // LOW-LEVEL BYPASS: Access internal properties to avoid recursive cloning in getOptions()/getQuery()
+                const queryOptions = (this as any)._mongooseOptions || {};
                 if (queryOptions.cache === false) return;
 
-                const query = this.getQuery();
                 const modelName = this.model.modelName;
                 const operation = (this as any).op;
-                const projection = this.get('projection');
-                const sort = this.get('sort');
-                const limit = this.get('limit');
-                const skip = this.get('skip');
-                const populate = this.get('populate');
-
+                
+                // Build cache key using raw internal properties
                 const cacheKey = generateCacheKey(modelName, operation, {
-                    query,
-                    projection,
-                    sort,
-                    limit,
-                    skip,
-                    populate,
+                    query: (this as any)._conditions,
+                    projection: (this as any)._fields,
+                    sort: (this as any).options?.sort,
+                    limit: (this as any).options?.limit,
+                    skip: (this as any).options?.skip,
+                    populate: (this as any)._mongooseOptions?.populate,
                     options: queryOptions
                 });
 
                 (this as any)._cacheKey = cacheKey;
                 (this as any)._modelName = modelName;
-                (this as any)._originalQuery = query;
                 (this as any)._queryOptions = queryOptions;
-                (this as any)._model = this.model;
 
+                // PRIORITY CHECK: Fast async lookup
                 const cached: any | null = await cache.get(cacheKey);
 
                 if (cached !== null) {
-                    if (debugMode) console.log(`[CACHE HIT] ${modelName}:${operation} -> ${cacheKey}`);
+                    if (self.debugMode) console.log(`[CACHE HIT] ${modelName}:${operation} -> ${cacheKey}`);
 
                     let resultToReturn;
-                    
                     const isLeanQuery = queryOptions.lean;
-                    
+
                     if (isLeanQuery) {
                         resultToReturn = cached;
                     } else {
@@ -862,32 +877,51 @@ export class MongooseCache {
                     return;
                 }
 
-                if (debugMode) console.log(`[CACHE MISS] ${modelName}:${operation} -> ${cacheKey}`);
+                // --- CACHE STAMPEDE PROTECTION (LAZY COALESCING) ---
+                const originalExec = this.exec.bind(this);
+                this.exec = async () => {
+                    const inflight = inflightQueries.get(cacheKey);
+                    if (inflight) {
+                        if (self.debugMode) console.log(`[QUERY COALESCED] Waiting for in-flight query: ${cacheKey}`);
+                        return inflight;
+                    }
+
+                    const p = originalExec();
+                    inflightQueries.set(cacheKey, p);
+
+                    try {
+                        const result = await p;
+                        return result;
+                    } finally {
+                        inflightQueries.delete(cacheKey);
+                    }
+                };
+
+                if (self.debugMode) console.log(`[CACHE MISS] ${modelName}:${operation} -> ${cacheKey}`);
                 (this as any)._cacheHit = false;
 
             } catch (error) {
-                if (debugMode) console.warn('Find cache pre-hook error:', error);
+                if ((self as any).debugMode) console.warn('Find cache pre-hook error:', error);
             }
 
         });
 
         schema.post(/^find/, async function (this: Query<any, any>, result: any): Promise<any> {
-            const cacheHit = (this as any)._cacheHit;
-
-            if (cacheHit) {
-                if (debugMode) console.log(`[FIND POST] Cache hit confirmed`);
+            if ((this as any)._cacheHit) {
+                if (self.debugMode) console.log(`[FIND POST] Cache hit confirmed`);
                 return result;
             }
 
-            handleCacheMiss(result, {
+            self.handleCacheMiss(result, {
                 cacheKey: (this as any)._cacheKey,
                 modelName: (this as any)._modelName,
                 originalQuery: (this as any)._originalQuery,
                 shouldSkipEmpty: skipEmpty,
-                enableSmartInvalidation,
-                debugMode,
+                enableSmartInvalidation: isSmartInvalidation,
+                debugMode: self.debugMode,
                 updateCacheInBackground,
-                toPlainObject
+                toPlainObject,
+                isLean: !!(this as any)._queryOptions?.lean
             });
 
             return result;
@@ -912,6 +946,9 @@ export class MongooseCache {
 
                 const cacheKey = generateCacheKey(modelName, 'aggregate', {
                     pipeline,
+                    hint: aggregateOptions.hint,
+                    collation: aggregateOptions.collation,
+                    readPreference: aggregateOptions.readPreference,
                     options: aggregateOptions
                 });
 
@@ -923,59 +960,52 @@ export class MongooseCache {
                 const cached: any[] | null = await cache.get(cacheKey);
 
                 if (cached !== null) {
-                    if (debugMode) console.log(`[AGGREGATE CACHE HIT] ${cacheKey}`);
-
+                    if (self.debugMode) console.log(`[AGGREGATE CACHE HIT] ${cacheKey}`);
                     (this as any)._cacheHit = true;
-                    
-                    // Aggregates are already plain - return directly
-                    this.exec = async function (): Promise<any[]> {
-                        return cached;
-                    };
-
+                    this.exec = async function (): Promise<any[]> { return cached; };
                     return;
                 }
 
-                if (debugMode) console.log(`[AGGREGATE CACHE MISS] ${cacheKey}`);
+                // --- CACHE STAMPEDE PROTECTION ---
+                const originalExec = this.exec.bind(this);
+                this.exec = async () => {
+                    const inflight = inflightQueries.get(cacheKey);
+                    if (inflight) {
+                        if (self.debugMode) console.log(`[AGGREGATE COALESCED] Waiting: ${cacheKey}`);
+                        return inflight;
+                    }
+                    const p = originalExec();
+                    inflightQueries.set(cacheKey, p);
+                    try { return await p; } finally { inflightQueries.delete(cacheKey); }
+                };
+
+                if (self.debugMode) console.log(`[AGGREGATE CACHE MISS] ${cacheKey}`);
                 (this as any)._cacheHit = false;
 
             } catch (error) {
-                if (debugMode) console.warn('Aggregate cache pre-hook error:', error);
+                if (self.debugMode) console.warn('Aggregate cache pre-hook error:', error);
             }
 
         });
 
         schema.post('aggregate', async function (this: Aggregate<any>, result: any[]): Promise<any[]> {
-            const cacheHit = (this as any)._cacheHit;
+            if ((this as any)._cacheHit) return result;
 
-            if (cacheHit) {
-                if (debugMode) console.log(`[AGGREGATE POST] Cache hit confirmed`);
-                return result;
-            }
+            const cacheKey = (this as any)._cacheKey;
+            const modelName = (this as any)._modelName;
+            const pipeline = (this as any)._pipeline;
 
-            try {
-                const shouldCache = !skipEmpty || (result && result.length > 0);
-                if (!shouldCache) return result;
-
-                const cacheKey = (this as any)._cacheKey;
-                const modelName = (this as any)._modelName;
-                const pipeline = (this as any)._pipeline;
-
-                if (cacheKey && modelName) {
-                    const dataToCache = toPlainObject(result || []);
-                    updateCacheInBackground(cacheKey, dataToCache);
-
-                    if (enableSmartInvalidation) {
-                        cache.addToIndexes(cacheKey, modelName, pipeline);
+            if (cacheKey && modelName) {
+                setImmediate(() => {
+                    try {
+                        const dataToCache = toPlainObject(result || []);
+                        updateCacheInBackground(cacheKey, dataToCache);
+                        if (isSmartInvalidation) cache.addToIndexes(cacheKey, modelName, pipeline);
+                    } catch (err) {
+                        if (self.debugMode) console.warn('Aggregate post-hook error:', err);
                     }
-
-                    if (debugMode && dataToCache.length > 50) {
-                        console.log(`[QUEUED] ${modelName} aggregate (${dataToCache.length} items)`);
-                    }
-                }
-            } catch (err) {
-                if (debugMode) console.warn('Aggregate post-hook cache error:', err);
+                });
             }
-
             return result;
         });
 
@@ -997,7 +1027,7 @@ export class MongooseCache {
                 const cached: number | null = await cache.get(cacheKey);
 
                 if (cached !== null) {
-                    if (debugMode) console.log(`[COUNT CACHE HIT] ${cacheKey} = ${cached}`);
+                    if (self.debugMode) console.log(`[COUNT CACHE HIT] ${cacheKey} = ${cached}`);
 
                     (this as any)._cacheHit = true;
                     this.exec = async () => cached;
@@ -1005,11 +1035,30 @@ export class MongooseCache {
                     return;
                 }
 
-                if (debugMode) console.log(`[COUNT CACHE MISS] ${cacheKey}`);
+                // --- CACHE STAMPEDE PROTECTION (LAZY COALESCING) ---
+                const originalExec = this.exec.bind(this);
+                this.exec = async () => {
+                    const inflight = inflightQueries.get(cacheKey);
+                    if (inflight) {
+                        if (self.debugMode) console.log(`[COUNT COALESCED] Waiting for: ${cacheKey}`);
+                        return inflight;
+                    }
+
+                    const p = originalExec();
+                    inflightQueries.set(cacheKey, p);
+
+                    try {
+                        return await p;
+                    } finally {
+                        inflightQueries.delete(cacheKey);
+                    }
+                };
+
+                if (self.debugMode) console.log(`[COUNT CACHE MISS] ${cacheKey}`);
                 (this as any)._cacheHit = false;
 
             } catch (err) {
-                if (debugMode) console.warn('Count cache pre-hook error:', err);
+                if (self.debugMode) console.warn('Count cache pre-hook error:', err);
             }
 
         });
@@ -1039,19 +1088,36 @@ export class MongooseCache {
                 const cached: any[] | null = await cache.get(cacheKey);
 
                 if (cached !== null) {
-                    if (debugMode) console.log(`[DISTINCT CACHE HIT] ${cacheKey}`);
-
+                    if (self.debugMode) console.log(`[DISTINCT CACHE HIT] ${cacheKey}`);
                     (this as any)._cacheHit = true;
                     this.exec = async () => cached;
-
                     return;
                 }
 
-                if (debugMode) console.log(`[DISTINCT CACHE MISS] ${cacheKey}`);
+                // --- CACHE STAMPEDE PROTECTION ---
+                const originalExec = this.exec.bind(this);
+                this.exec = async () => {
+                    const inflight = inflightQueries.get(cacheKey);
+                    if (inflight) {
+                        if (self.debugMode) console.log(`[DISTINCT COALESCED] Waiting for: ${cacheKey}`);
+                        return inflight;
+                    }
+
+                    const p = originalExec();
+                    inflightQueries.set(cacheKey, p);
+
+                    try {
+                        return await p;
+                    } finally {
+                        inflightQueries.delete(cacheKey);
+                    }
+                };
+
+                if (self.debugMode) console.log(`[DISTINCT CACHE MISS] ${cacheKey}`);
                 (this as any)._cacheHit = false;
 
             } catch (err) {
-                if (debugMode) console.warn('Distinct cache pre-hook error:', err);
+                if (self.debugMode) console.warn('Distinct cache pre-hook error:', err);
             }
 
         });
@@ -1084,9 +1150,9 @@ export class MongooseCache {
          * - deleteOne/Many, findOneAndDelete, remove: Remove from arrays
          */
         const updateCachedData: (modelName: string, operation: string, query: any, updateData: any, resultDoc?: any) => void = this.updateCachedData.bind(this);
-        
+
         const createUpdateHandler = (operation: string): ((doc?: any) => void) => {
-            return function(this: any, doc?: any): void {
+            return function (this: any, doc?: any): void {
                 try {
                     // Resolve model name from multiple possible locations
                     const modelName: string | null =
@@ -1098,7 +1164,7 @@ export class MongooseCache {
                         null;
 
                     if (!modelName) {
-                        if (debugMode) {
+                        if (self.debugMode) {
                             console.warn(`[Mutation] Could not determine model name for ${operation}`);
                         }
                         return;
@@ -1129,9 +1195,9 @@ export class MongooseCache {
 
                     // Trigger smart cache invalidation (background process)
                     updateCachedData(modelName, operation, query, updateData, resultDocument);
-                    
+
                 } catch (error) {
-                    if (debugMode) {
+                    if (self.debugMode) {
                         console.warn(`[Mutation Error] Failed to process ${operation}:`, error);
                     }
                 }
@@ -1139,8 +1205,8 @@ export class MongooseCache {
         };
 
         const mutations: string[] = [
-            'save', 'insertMany', 'updateOne', 'updateMany', 
-            'findOneAndUpdate', 'replaceOne', 'deleteOne', 'deleteMany', 
+            'save', 'insertMany', 'updateOne', 'updateMany',
+            'findOneAndUpdate', 'replaceOne', 'deleteOne', 'deleteMany',
             'findOneAndDelete', 'findOneAndRemove', 'remove'
         ];
 
@@ -1164,7 +1230,7 @@ export class MongooseCache {
     public async flushCache(): Promise<void> {
         await this.flushBulkUpdates();
         await this.cache.clear();
-        
+
         if (this.debugMode) {
             console.log('Cache flushed');
         }
@@ -1179,7 +1245,7 @@ export class MongooseCache {
         return await this.cache.invalidateModel(modelName);
     }
 
-    public async reconnectCache(): Promise<void>{
+    public async reconnectCache(): Promise<void> {
         return await this.cache.reconnect()
     }
 
@@ -1198,7 +1264,7 @@ export class MongooseCache {
         });
 
         await Promise.allSettled(warmPromises);
-        
+
         if (this.debugMode) {
             console.log(`Warmed cache with ${commonQueries.length} queries`);
         }
@@ -1208,7 +1274,7 @@ export class MongooseCache {
         operations.forEach(({ modelName, query, updateData }) => {
             this.updateCachedData(modelName, 'update', query, updateData);
         });
-        
+
         if (this.debugMode) {
             console.log(`Batch invalidation triggered for ${operations.length} operations`);
         }
@@ -1223,9 +1289,9 @@ export class MongooseCache {
 
     public async disconnect(): Promise<void> {
         if (this.isDisconnecting) return;
-        
+
         this.isDisconnecting = true;
-        
+
         if (this.bulkFlushTimer) {
             clearInterval(this.bulkFlushTimer);
         }
@@ -1233,10 +1299,10 @@ export class MongooseCache {
         if (this.memoryCheckTimer) {
             clearInterval(this.memoryCheckTimer);
         }
-        
+
         await this.flushBulkUpdates();
         await this.cache.disconnect();
-        
+
         if (this.debugMode) {
             console.log('Cache disconnected gracefully');
         }
@@ -1261,7 +1327,7 @@ export class MongooseCache {
     public updateConfig(newConfig: Partial<CacheConfig>): void {
         this.config = { ...this.config, ...newConfig };
         this.debugMode = this.config.debug;
-        
+
         if (this.debugMode) {
             console.log('[Config] Cache configuration updated');
         }

@@ -79,14 +79,14 @@ async function runBenchmark() {
             flags: { isArchived: Boolean, isPublic: Boolean, tags: [String] }
         });
 
-        const Organization = model('Organization', OrgSchema);
-        const User = model('User', UserSchema);
-        const Project = model('Project', ProjectSchema);
-
         const cache = new MongooseCache(cacheConfig);
         cache.applyCacheToQueries(OrgSchema);
         cache.applyCacheToQueries(UserSchema);
         cache.applyCacheToQueries(ProjectSchema);
+
+        const Organization = model('Organization', OrgSchema);
+        const User = model('User', UserSchema);
+        const Project = model('Project', ProjectSchema);
 
         // 2. SEED HEAVY DATA
         console.log('Generating heavy relational data...');
@@ -106,23 +106,44 @@ async function runBenchmark() {
             email: 'admin@globaltech.com',
             orgId: org._id,
             security: { roles: ['root', 'billing'], permissions: ['manage_users', 'view_all_data'] },
-            activityLogs: Array.from({ length: 15 }, (_, i) => ({ action: `LOGIN_ATTEMPT_${i}`, ip: '1.1.1.1' }))
+            activityLogs: Array.from({ length: 50 }, (_, i) => ({ action: `LOGIN_ATTEMPT_${i}`, ip: '1.1.1.1' }))
         });
 
         const project = await Project.create({
             title: 'Project Antigravity',
             code: 'ANT-101',
             ownerId: user._id,
-            milestones: Array.from({ length: 5 }, (_, i) => ({
+            milestones: Array.from({ length: 15 }, (_, i) => ({
                 name: `Phase ${i + 1}`,
                 dueDate: new Date(),
-                tasks: Array.from({ length: 3 }, (_, j) => ({ title: `Task ${i}-${j}`, assignedTo: 'Dev Team', priority: 1 }))
+                tasks: Array.from({ length: 10 }, (_, j) => ({ title: `Task ${i}-${j}`, assignedTo: 'Dev Team', priority: 1 }))
             })),
             resources: { budget: 500000, currency: 'USD', allocatedHours: 1200 },
             flags: { isArchived: false, isPublic: true, tags: ['node', 'mongoose', 'high-performance'] }
         });
 
-        const iterations = 500;
+        const iterations = 2000;
+
+        // --- STAMPEDE VERIFICATION ---
+        console.log('🧪 VERIFYING REQUEST COALESCING (Stampede Protection)...');
+        await cache.flushCache();
+
+        console.log('Firing 20 simultaneous queries for the same key...');
+        const stampedeStart = performance.now();
+
+        // Execute 20 identical queries at the exact same time
+        const results = await Promise.all(
+            Array.from({ length: 20 }, () =>
+                Project.findById(project._id)
+                    .populate({ path: 'ownerId', populate: { path: 'orgId' } })
+                    .lean()
+            )
+        );
+
+        const stampedeEnd = performance.now();
+        console.log(`Result: All 20 requests finished in ${(stampedeEnd - stampedeStart).toFixed(2)}ms.`);
+        console.log('Check the logs above ^. You should see EXACTLY ONE [CACHE MISS] and 19 [QUERY COALESCED].\n');
+
         console.log(`\nStarting HEAVY Benchmark (${iterations} iterations)...\n`);
 
         // --- PERFORMANCE RUNS ---

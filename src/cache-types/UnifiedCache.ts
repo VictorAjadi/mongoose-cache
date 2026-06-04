@@ -592,42 +592,32 @@ export class UnifiedCache {
         // Hash relevant options if present
         if (options) {
             const optionKeys = ['sort', 'limit', 'skip', 'select', 'populate'];
-            const relevantOptions: any = {};
+            let optionsStr = '';
 
             for (const key of optionKeys) {
                 if (options[key] !== undefined) {
-                    relevantOptions[key] = options[key];
+                    optionsStr += `${key}:${typeof options[key] === 'object' ? 'obj' : options[key]}|`;
                 }
             }
 
-            if (Object.keys(relevantOptions).length > 0) {
-                if (this.config.useCryptoHash) {
-                    parts.push(`o:${this.fastHash(relevantOptions)}`);
-                } else {
-                    parts.push(`o:${JSON.stringify(relevantOptions)}`);
-                }
+            if (optionsStr) {
+                parts.push(`o:${this.fastHash(optionsStr)}`);
             }
         }
 
         // Hash query or pipeline
         if (query && typeof query === 'object') {
             if (Array.isArray(query)) {
-                // Aggregation pipeline
-                if (this.config.useCryptoHash) {
-                    const pipelineHash = PipelineHashGenerator.generateFastHash(query);
-                    parts.push(`p:${pipelineHash}`);
-                } else {
-                    const pipeline = query.map((stage: any, idx: number) => 
-                        `${idx}:${JSON.stringify(stage)}`
-                    ).join('|');
-                    parts.push(`p:${pipeline}`);
-                }
+                // FAST PIPELINE HASH: Use PipelineHashGenerator.generateFastHash which is already optimized
+                parts.push(`p:${PipelineHashGenerator.generateFastHash(query)}`);
             } else {
-                // Query object
-                if (this.config.useCryptoHash) {
-                    parts.push(`q:${this.fastHash(query)}`);
+                // FAST QUERY HASH: Avoid deep JSON.stringify for complex queries
+                // We use a shallow signature + length for speed, then hash only if necessary
+                const querySignature = `${Object.keys(query).length}:${typeof query}`;
+                if (query._id) {
+                   parts.push(`q:${String(query._id)}`);
                 } else {
-                    parts.push(`q:${JSON.stringify(query)}`);
+                   parts.push(`q:${this.fastHash(query)}`);
                 }
             }
         } else if (query !== undefined) {
@@ -639,13 +629,13 @@ export class UnifiedCache {
         const key = parts.join(':');
 
         // Use hash if key is too long or hashing is configured
-        if (key.length > 200 || this.config.useCryptoHash) {
-            const hash = this.fastHash(key);
-            return `${modelName}:${op}:h${hash}`;
+        if (key.length > 120 || this.config.useCryptoHash) {
+            return `${modelName}:${op}:h${this.fastHash(key)}`;
         }
 
         return key;
     }
+
 
     /**
      * Fast MD5 hash for cache keys

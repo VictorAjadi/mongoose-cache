@@ -26,6 +26,7 @@ export interface CacheEntry {
     a: number; // Last access timestamp in seconds
     t: number; // Creation timestamp in seconds
     v: number; // Version number
+    r?: boolean; // Raw object flag (true = skip deserialization)
 }
 
 export interface IndexEntry {

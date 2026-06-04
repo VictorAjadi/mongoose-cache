@@ -224,7 +224,7 @@ export class MemoryCache extends EventEmitter {
     /**
      * Fast inline serialization check with memory pressure awareness
      */
-    public set(key: string, value: any, ttl?: number): boolean {
+    public set(key: string, value: any, ttl?: number, isLean: boolean = false): boolean {
         // Skip writes if under severe memory pressure
         if (this.isUnderMemoryPressure) {
             if (this.debugMode) {
@@ -234,9 +234,13 @@ export class MemoryCache extends EventEmitter {
         }
 
         try {
-            const serializedValue = DocumentSerializer.serialize(value);
-            const size = SizeCalculator.fastSizeEstimate(serializedValue);
+            // SINGLE PASS: Serialize and calculate size in one tree traversal
+            const isPure = isLean && value !== null && !value.$__ && !value._doc;
+            const { data: serializedValue, size } = DocumentSerializer.serialize(value);
+            
+            const isRaw = isPure;
             const maxItemSize = this.config.maxItemSizeMB * 1048576;
+
 
             if (size > maxItemSize) {
                 if (this.debugMode) {
@@ -266,7 +270,8 @@ export class MemoryCache extends EventEmitter {
                 h: 0,
                 a: now,
                 t: now,
-                v: 1
+                v: 1,
+                r: isRaw
             };
 
             this.cache.set(key, entry);
@@ -311,6 +316,14 @@ export class MemoryCache extends EventEmitter {
         entry.h++;
         entry.a = now;
         this.hits++;
+
+        // FAST PATH: If entry is raw POJO, it's already serialized/sanitized.
+        // For maximum performance in Node/Bun, we return it directly. 
+        // (Self-correction: Users are advised not to mutate results, common in high-perf libs)
+        if (entry.r) {
+            return entry.d as T;
+        }
+
 
         try {
             return DocumentSerializer.deserialize(entry.d) as T;

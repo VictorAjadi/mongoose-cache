@@ -170,10 +170,11 @@ export class RedisAdapter extends EventEmitter {
                 if (now - timestamp > 5000) continue;
 
                 try {
-                    const serializedValue = DocumentSerializer.serialize(value);
-                    const size = SizeCalculator.fastSizeEstimate(serializedValue);
+                    // SINGLE PASS: Combined serialization and size calculation
+                    const { data: serializedValue, size } = DocumentSerializer.serialize(value);
 
                     if (size <= this.config.maxItemSizeMB * 1048576) {
+
                         const entry: CacheEntry = {
                             d: serializedValue,
                             e: Math.floor(Date.now() / 1000) + ttl,
