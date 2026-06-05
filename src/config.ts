@@ -9,6 +9,7 @@ export type CacheConfig = {
     redisDropThreshold?: number; // Redis memory threshold (0-100%) to start evicting
     memoryDropThreshold?: number; // In-memory cache threshold (0-100%) to start evicting
     memoryThreshold?: number; // Node.js/Bun heap threshold (0-100%) to trigger flush
+    hotKeyThreshold?: number; // Hot key bypass threshold (accesses per minute)
     redis?: {
         host?: string; // Redis server host
         port?: number; // Redis server port
@@ -16,7 +17,7 @@ export type CacheConfig = {
         db?: number; // Redis database number
         keyPrefix?: string; // Prefix for all Redis keys
     };
-}
+};
 
 export interface CacheEntry {
     d: any; // Serialized data
@@ -70,6 +71,7 @@ export const DEFAULT_CONFIG: Required<CacheConfig> = {
     redisDropThreshold: 85,
     memoryDropThreshold: 80,
     memoryThreshold: 90,
+    hotKeyThreshold: 100,
     redis: {
         host: 'localhost',
         port: 6379,

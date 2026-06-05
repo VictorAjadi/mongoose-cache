@@ -673,7 +673,7 @@ export class RedisAdapter extends EventEmitter {
         }
     }
 
-    public async set(key: string, value: any, ttl?: number): Promise<boolean> {
+    public async set(key: string, value: any, ttl?: number, _isLean?: boolean): Promise<boolean> {
         if (!this.client || !this.connected) {
             return false;
         }
@@ -971,7 +971,7 @@ export class RedisAdapter extends EventEmitter {
         }
     }
 
-    public async mset(entries: Map<string, { value: any; ttl?: number }>): Promise<number> {
+    public async mset(entries: Map<string, { value: any; ttl?: number; isLean?: boolean }>): Promise<number> {
         if (!this.client || !this.connected || entries.size === 0) {
             return 0;
         }

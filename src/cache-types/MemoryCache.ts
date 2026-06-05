@@ -227,61 +227,58 @@ export class MemoryCache extends EventEmitter {
     public set(key: string, value: any, ttl?: number, isLean: boolean = false): boolean {
         // Skip writes if under severe memory pressure
         if (this.isUnderMemoryPressure) {
-            if (this.debugMode) {
-                console.warn(`Skipping write for ${key} due to memory pressure`);
-            }
+            if (this.debugMode) console.warn(`Skipping write for ${key} due to memory pressure`);
             return false;
         }
 
         try {
-            // SINGLE PASS: Serialize and calculate size in one tree traversal
-            const isPure = isLean && value !== null && !value.$__ && !value._doc;
-            const { data: serializedValue, size } = DocumentSerializer.serialize(value);
+            const isMongooseDoc = !!(value && (value.$__ || value._doc));
+            const shouldSerialize = !isLean || isMongooseDoc;
             
-            const isRaw = isPure;
-            const maxItemSize = this.config.maxItemSizeMB * 1048576;
+            let dataToStore: any;
+            let size: number;
 
-
-            if (size > maxItemSize) {
-                if (this.debugMode) {
-                    console.warn(`Item too large: ${(size / 1048576).toFixed(2)}MB`);
-                }
-                return false;
+            if (shouldSerialize) {
+                // Regular path: serialize and sanitize
+                const serialized = DocumentSerializer.serialize(value);
+                dataToStore = serialized.data;
+                size = serialized.size;
+            } else {
+                // FAST PATH: Direct cache for lean results
+                // We use a cheap estimation for size to avoid traversal
+                dataToStore = value;
+                // Estimate: roughly 50 bytes per key-value pair as a safe buffer
+                size = (value && typeof value === 'object') ? Object.keys(value).length * 50 : 100;
             }
+            
+            const maxItemSize = this.config.maxItemSizeMB * 1048576;
+            if (size > maxItemSize) return false;
 
-            // Check if adding this would exceed threshold
+            // Threshold check
             if (this.maxSizeBytes > 0 && this.currentSize + size > this.maxSizeBytes) {
-                // Evict a reasonable chunk: at least the new item or 15% of target
-                const neededSize = Math.max(size, Math.floor(this.maxSizeBytes * 0.15));
-                this.evictLRU(neededSize);
+                this.evictLRU(Math.max(size, Math.floor(this.maxSizeBytes * 0.15)));
             }
 
             const now = Math.floor(Date.now() / 1000);
             const existing = this.cache.get(key);
-
-            if (existing) {
-                this.currentSize -= existing.s;
-            }
+            if (existing) this.currentSize -= existing.s;
 
             const entry: CacheEntry = {
-                d: serializedValue,
+                d: dataToStore,
                 e: now + (ttl ?? this.config.ttl),
                 s: size,
                 h: 0,
                 a: now,
                 t: now,
                 v: 1,
-                r: isRaw
+                r: !shouldSerialize
             };
 
             this.cache.set(key, entry);
             this.currentSize += size;
-
             return true;
         } catch (error) {
-            if (this.debugMode) {
-                console.error('MemoryCache SET error:', error);
-            }
+            if (this.debugMode) console.error('MemoryCache SET error:', error);
             return false;
         }
     }
@@ -402,7 +399,7 @@ export class MemoryCache extends EventEmitter {
         return result;
     }
 
-    public mset(entries: Map<string, { value: any; ttl?: number }>): number {
+    public mset(entries: Map<string, { value: any; ttl?: number; isLean?: boolean }>): number {
         // Skip if under memory pressure
         if (this.isUnderMemoryPressure) {
             if (this.debugMode) {
@@ -413,8 +410,8 @@ export class MemoryCache extends EventEmitter {
 
         let successCount = 0;
 
-        for (const [key, { value, ttl }] of entries) {
-            if (this.set(key, value, ttl)) {
+        for (const [key, { value, ttl, isLean }] of entries) {
+            if (this.set(key, value, ttl, isLean)) {
                 successCount++;
             }
         }
