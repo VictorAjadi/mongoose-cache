@@ -22,12 +22,14 @@ async function runBenchmark() {
 
     const mongoUri = await question('Enter MongoDB URI (default: mongodb://localhost:27017/benchmark-db): ') || 'mongodb://localhost:27017/benchmark-db';
     const backend = (await question('Choose Backend (memory/redis, default: memory): ')).toLowerCase() || 'memory';
-
-    let cacheConfig: any = { ttl: 300, debug: false };
+    const iterations = Number(await question('Enter number of iterations (default: 2000): ')) || 2000;
+    const ttl = Number(await question('Enter TTL in seconds (default: 300): ')) || 300;
+    const debug = (await question('Enable debug logging? (true/false, default: false): ')).toLowerCase() === 'true';
+    let cacheConfig: any = { ttl: ttl, debug: debug };
     if (backend === 'redis') {
         cacheConfig.redis = {
             host: await question('Redis Host (default: localhost): ') || 'localhost',
-            port: parseInt(await question('Redis Port (default: 6379): ') || '6379')
+            port: Number(await question('Redis Port (default: 6379): ')) || 6379
         };
     }
 
@@ -121,8 +123,6 @@ async function runBenchmark() {
             resources: { budget: 500000, currency: 'USD', allocatedHours: 1200 },
             flags: { isArchived: false, isPublic: true, tags: ['node', 'mongoose', 'high-performance'] }
         });
-
-        const iterations = 2000;
 
         // --- STAMPEDE VERIFICATION ---
         console.log('🧪 VERIFYING REQUEST COALESCING (Stampede Protection)...');
