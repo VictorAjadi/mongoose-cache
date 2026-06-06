@@ -767,7 +767,7 @@ export class MongooseCache {
 
         if (this.debugMode) console.log('[MongooseCache] Applying hooks to schema...');
 
-        const { skipEmpty = true, enableSmartInvalidation = this.config.enableSmartInvalidation } = options;
+        const { skipEmpty = true } = options;
 
         const self = this;
         const isSmartInvalidation = this.config.enableSmartInvalidation;

@@ -4,26 +4,40 @@ import { CacheConfig, CacheEntry } from '../config';
 import { SizeCalculator } from '../SizeCalculator';
 import { DocumentSerializer } from '../documentSerializer';
 import { MemoryMonitor } from '../MemoryMonitor';
+
 /**
- * Redis adapter with robust connection handling.
+ * Type definitions for distributed cache invalidation signals
+ */
+export interface InvalidationSignal {
+    type: 'model' | 'key' | 'pattern';
+    target: string;
+    sourceId?: string;
+    timestamp?: number;
+}
+
+/**
+ * Redis adapter with robust connection handling and distributed invalidation support.
+ * 
+ * FIX: Subscriber connection properly waits for 'ready' event before subscribing
  */
 export class RedisAdapter extends EventEmitter {
     private client: Redis | null = null;
+    private subscriber: Redis | null = null;
     private connected: boolean = false;
     private connecting: boolean = false;
     private config: Required<CacheConfig>;
     private debugMode: boolean;
-    
+
     private hits: number = 0;
     private misses: number = 0;
     private errors: number = 0;
     private readOperations: number = 0;
     private writeOperations: number = 0;
-    
+
     private memoryCheckInterval?: ReturnType<typeof setInterval>;
     private reconnectAttempts: number = 0;
     private readonly MAX_RECONNECT_ATTEMPTS = 10;
-    
+
     // Connection health monitoring
     private lastSuccessfulOperation: number = Date.now();
     private healthCheckInterval?: ReturnType<typeof setInterval>;
@@ -45,16 +59,22 @@ export class RedisAdapter extends EventEmitter {
     private isUnderMemoryPressure: boolean = false;
     private lastEvictionTime: number = 0;
     private readonly MIN_EVICTION_INTERVAL = 10000;
-    
+
     // Total cache size tracking
     private totalCacheSizeMB: number = 0;
     // Detected or configured Redis maxmemory in bytes (0 if unknown/not set)
     private redisMaxMemoryBytes: number = 0;
 
+    // Distributed invalidation
+    private readonly INVALIDATION_CHANNEL = 'mongoose-cache:invalidation';
+    private readonly instanceId: string;
+    public distributedSignalCount: number = 0;
+
     constructor(config: Required<CacheConfig>) {
         super();
         this.config = config;
         this.debugMode = config.debug;
+        this.instanceId = Math.random().toString(36).substring(2, 11);
     }
 
     /**
@@ -88,13 +108,13 @@ export class RedisAdapter extends EventEmitter {
 
         this.healthCheckInterval = setInterval(async () => {
             const timeSinceLastOp = Date.now() - this.lastSuccessfulOperation;
-            
+
             // If no successful operations for too long, try to ping
             if (timeSinceLastOp > this.OPERATION_TIMEOUT) {
                 if (this.debugMode) {
                     console.warn(`No successful operations for ${Math.floor(timeSinceLastOp / 1000)}s, checking connection...`);
                 }
-                
+
                 const isAlive = await this.ping();
                 if (!isAlive && this.connected) {
                     if (this.debugMode) {
@@ -112,13 +132,155 @@ export class RedisAdapter extends EventEmitter {
     }
 
     /**
+     * Setup distributed invalidation pub/sub listener
+     * Uses a separate subscriber client since Redis pub/sub requires dedicated connection
+     * 
+     * CRITICAL FIX: Must wait for subscriber to be ready BEFORE attempting to subscribe
+     * This prevents "Stream isn't writeable and enableOfflineQueue options is false" errors
+     */
+    private async setupSubscriber(): Promise<void> {
+        try {
+            if (!this.subscriber) {
+                const redisOptions: RedisOptions = {
+                    host: this.config.redis.host as string,
+                    port: this.config.redis.port,
+                    password: this.config.redis.password,
+                    db: this.config.redis.db,
+                    connectTimeout: 10000,
+                    commandTimeout: 5000,
+                    maxRetriesPerRequest: 3,
+                    enableReadyCheck: true,
+                    enableOfflineQueue: false,
+                    lazyConnect: true,  // ✅ CRITICAL: Start in lazy mode to control connection timing
+                    family: 4,
+                    connectionName: 'redis-adapter-subscriber',
+                };
+
+                this.subscriber = new Redis(redisOptions);
+
+                this.subscriber.on('error', (error) => {
+                    if (this.debugMode) {
+                        console.warn('[RedisAdapter] Subscriber error:', error.message);
+                    }
+                });
+
+                this.subscriber.on('close', () => {
+                    if (this.debugMode) {
+                        console.warn('[RedisAdapter] Subscriber connection closed');
+                    }
+                });
+
+                // ✅ CRITICAL: Wait for subscriber to be ready BEFORE attempting to subscribe
+                // This prevents "Stream isn't writeable" errors when enableOfflineQueue is false
+                await new Promise<void>((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                        reject(new Error('Subscriber connection timeout after 15s'));
+                    }, 15000);
+
+                    this.subscriber!.once('ready', () => {
+                        clearTimeout(timeout);
+                        if (this.debugMode) {
+                            console.log('[RedisAdapter] Subscriber connection ready');
+                        }
+                        resolve();
+                    });
+
+                    this.subscriber!.once('error', (err) => {
+                        clearTimeout(timeout);
+                        reject(err);
+                    });
+
+                    // Explicitly connect in controlled manner
+                    this.subscriber!.connect().catch(reject);
+                });
+            }
+
+            // ✅ NOW subscribe after connection is confirmed ready
+            await this.subscriber.subscribe(this.INVALIDATION_CHANNEL);
+
+            if (this.debugMode) {
+                console.log(`[RedisAdapter] Successfully subscribed to invalidation channel: ${this.INVALIDATION_CHANNEL}`);
+            }
+
+            // Handle incoming invalidation messages
+            this.subscriber.on('message', (channel, message) => {
+                if (channel !== this.INVALIDATION_CHANNEL) return;
+
+                try {
+                    const signal: InvalidationSignal = JSON.parse(message);
+
+                    // Skip messages from this instance (already applied locally)
+                    if (signal.sourceId === this.instanceId) {
+                        return;
+                    }
+
+                    this.distributedSignalCount++;
+
+                    if (this.debugMode) {
+                        console.log(
+                            `[RedisAdapter] Received ${signal.type} invalidation for: ${signal.target}`
+                        );
+                    }
+
+                    // Emit event for UnifiedCache to handle
+                    this.emit('distributed-invalidation', signal);
+                } catch (error) {
+                    if (this.debugMode) {
+                        console.warn('[RedisAdapter] Failed to parse invalidation signal:', error);
+                    }
+                }
+            });
+
+        } catch (error: any) {
+            if (this.debugMode) {
+                console.error('[RedisAdapter] Subscriber setup error:', error.message);
+            }
+            // Graceful degradation: continue without distributed invalidation
+            // Local cache will still work fine, other instances just won't get invalidation broadcasts
+        }
+    }
+
+    /**
+     * Broadcast an invalidation signal to all connected instances via Redis pub/sub
+     * Other instances receive it through their subscriber and emit 'distributed-invalidation'
+     *
+     * @param signal - The invalidation signal with type ('model'|'key'|'pattern') and target
+     */
+    public async broadcastInvalidation(signal: InvalidationSignal): Promise<void> {
+        if (!this.client || !this.connected) {
+            return;
+        }
+
+        try {
+            const message = JSON.stringify({
+                ...signal,
+                sourceId: this.instanceId,
+                timestamp: Date.now(),
+            });
+
+            await this.client.publish(this.INVALIDATION_CHANNEL, message);
+
+            if (this.debugMode) {
+                console.log(
+                    `[RedisAdapter] Broadcasted ${signal.type} invalidation for: ${signal.target}`
+                );
+            }
+        } catch (error: any) {
+            if (this.debugMode) {
+                console.error('[RedisAdapter] broadcastInvalidation error:', error.message);
+            }
+        }
+    }
+
+    /**
      * Attempt to reconnect to Redis
      */
-    public async reconnect(mode: 'in-app'|'manual'='in-app'): Promise<void> {
+    public async reconnect(mode: 'in-app' | 'manual' = 'in-app'): Promise<void> {
         if (this.connecting) {
             return;
         }
-        if(mode==='in-app'){
+
+        if (mode === 'in-app') {
             if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
                 if (this.debugMode) {
                     console.error('Max reconnect attempts reached, giving up');
@@ -128,12 +290,12 @@ export class RedisAdapter extends EventEmitter {
 
             this.reconnectAttempts++;
         }
-        
+
         if (this.debugMode) {
-            console.log(`Attempting manual reconnect (${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS})...`);
+            console.log(`Attempting reconnect (${this.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS})...`);
         }
 
-        // Disconnect old client
+        // Disconnect old clients
         if (this.client) {
             try {
                 await this.client.quit();
@@ -141,6 +303,15 @@ export class RedisAdapter extends EventEmitter {
                 // Ignore errors on quit
             }
             this.client = null;
+        }
+
+        if (this.subscriber) {
+            try {
+                await this.subscriber.quit();
+            } catch {
+                // Ignore errors on quit
+            }
+            this.subscriber = null;
         }
 
         // Try to reconnect
@@ -268,7 +439,7 @@ export class RedisAdapter extends EventEmitter {
                         }
                         return null; // Stop retrying
                     }
-                    
+
                     const delay = Math.min(times * 1000, 10000);
                     if (this.debugMode) {
                         console.log(`Retry attempt ${times}, waiting ${delay}ms...`);
@@ -311,11 +482,11 @@ export class RedisAdapter extends EventEmitter {
                     this.connecting = false;
                     this.reconnectAttempts = 0;
                     this.lastSuccessfulOperation = Date.now();
-                    
+
                     if (this.debugMode) {
                         console.log('[RedisAdapter] Connected successfully');
                     }
-                    
+
                     resolve();
                 });
 
@@ -335,6 +506,11 @@ export class RedisAdapter extends EventEmitter {
             });
 
             this.setupEventHandlers();
+
+            // Setup distributed invalidation AFTER main connection is ready
+            // This now properly waits for subscriber to be ready before subscribing
+            await this.setupSubscriber();
+
             this.startBatchProcessor();
             this.startMemoryMonitoring();
             this.startHealthCheck();
@@ -344,7 +520,7 @@ export class RedisAdapter extends EventEmitter {
         } catch (error: any) {
             this.connecting = false;
             this.connected = false;
-            
+
             if (this.debugMode) {
                 console.error('Redis connection failed:', {
                     message: error.message,
@@ -353,7 +529,7 @@ export class RedisAdapter extends EventEmitter {
                     syscall: error.syscall
                 });
             }
-            
+
             if (this.client) {
                 try {
                     this.client.disconnect();
@@ -362,7 +538,7 @@ export class RedisAdapter extends EventEmitter {
                 }
                 this.client = null;
             }
-            
+
             this.emit('error', error);
             return false;
         }
@@ -397,7 +573,7 @@ export class RedisAdapter extends EventEmitter {
             if (this.debugMode) {
                 console.log(`Redis reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})...`);
             }
-            
+
             if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
                 this.client?.disconnect();
                 if (this.debugMode) {
@@ -410,19 +586,19 @@ export class RedisAdapter extends EventEmitter {
             this.connected = true;
             this.reconnectAttempts = 0;
             this.lastSuccessfulOperation = Date.now();
-            
+
             if (this.debugMode) {
                 console.log('Redis connection restored');
             }
-            
+
             if (!this.writeTimer) {
                 this.startBatchProcessor();
             }
-            
+
             if (!this.healthCheckInterval) {
                 this.startHealthCheck();
             }
-            
+
             this.emit('reconnect');
         });
 
@@ -444,32 +620,32 @@ export class RedisAdapter extends EventEmitter {
                 const info = await this.getMemoryInfo();
                 const redisThreshold = this.config.redisDropThreshold;
                 const processThreshold = this.config.memoryThreshold;
-                
+
                 const heapUtilization = MemoryMonitor.getHeapUtilization();
-                
+
                 const isRedisPressure = info.usagePercentage >= redisThreshold;
                 const isProcessPressure = heapUtilization >= processThreshold;
 
                 if (isRedisPressure || isProcessPressure) {
                     this.isUnderMemoryPressure = true;
-                    
+
                     this.emit('memory-pressure', {
                         ...info,
                         processPercentage: heapUtilization,
                         source: isProcessPressure ? 'process' : 'redis'
                     });
-                    
+
                     if (this.debugMode) {
                         console.warn(
                             `[RedisAdapter] PRESSURE: Redis ${info.usagePercentage.toFixed(1)}% | ` +
                             `Process ${heapUtilization.toFixed(1)}% (Thresholds: ${redisThreshold}% / ${processThreshold}%)`
                         );
                     }
-                    
+
                     const now = Date.now();
                     if (now - this.lastEvictionTime >= this.MIN_EVICTION_INTERVAL) {
                         this.lastEvictionTime = now;
-                        
+
                         setImmediate(() => {
                             this.evictToTarget().catch((err) => {
                                 if (this.debugMode) {
@@ -502,9 +678,9 @@ export class RedisAdapter extends EventEmitter {
         try {
             const info = await this.client.info('memory');
             this.lastSuccessfulOperation = Date.now();
-            
+
             const lines = info.split('\r\n');
-            
+
             let usedMemory = 0;
             let maxMemory = 0;
             let fragRatio = 1.0;
@@ -578,7 +754,7 @@ export class RedisAdapter extends EventEmitter {
             const memInfo = await this.getMemoryInfo();
             const threshold = this.config.redisDropThreshold;
             const targetPercentage = threshold * 0.5;
-            
+
             if (memInfo.usagePercentage <= targetPercentage) {
                 return 0;
             }
@@ -600,7 +776,7 @@ export class RedisAdapter extends EventEmitter {
 
             const sampleSize = Math.min(Math.ceil(keys.length * 0.5), 5000);
             const sampledKeys = keys.slice(0, sampleSize);
-            
+
             const entries: Array<{ key: string; accessTime: number; size: number }> = [];
 
             const pipeline = this.client.pipeline();
@@ -698,7 +874,7 @@ export class RedisAdapter extends EventEmitter {
 
             if (this.writeQueue.size >= this.MAX_BATCH_SIZE) {
                 setImmediate(() => {
-                    this.flushWriteQueue().catch(() => {});
+                    this.flushWriteQueue().catch(() => { });
                 });
             }
 
@@ -740,7 +916,7 @@ export class RedisAdapter extends EventEmitter {
         try {
             const data = await this.client.get(key);
             this.lastSuccessfulOperation = Date.now();
-            
+
             if (!data) {
                 this.misses++;
                 this.readCache.delete(key);
@@ -752,7 +928,7 @@ export class RedisAdapter extends EventEmitter {
 
             if (entry.e <= now) {
                 setImmediate(() => {
-                    this.delete(key).catch(() => {});
+                    this.delete(key).catch(() => { });
                 });
                 this.misses++;
                 this.readCache.delete(key);
@@ -767,9 +943,9 @@ export class RedisAdapter extends EventEmitter {
             entry.h++;
             entry.a = now;
             setImmediate(() => {
-                this.client?.setex(key, entry.e - now, JSON.stringify(entry)).catch(() => {});
+                this.client?.setex(key, entry.e - now, JSON.stringify(entry)).catch(() => { });
             });
-            
+
             try {
                 return DocumentSerializer.deserialize(entry.d) as T;
             } catch (error) {
@@ -782,11 +958,11 @@ export class RedisAdapter extends EventEmitter {
         } catch (error: any) {
             this.errors++;
             this.misses++;
-            
+
             if (this.debugMode) {
                 console.error(`Redis GET error for ${key}:`, error.message);
             }
-            
+
             return null;
         }
     }
@@ -803,7 +979,7 @@ export class RedisAdapter extends EventEmitter {
         const cached = this.readCache.get(key);
         if (cached) {
             const now = Date.now();
-            if (now - cached.timestamp < this.READ_CACHE_TTL && 
+            if (now - cached.timestamp < this.READ_CACHE_TTL &&
                 cached.entry.e > Math.floor(now / 1000)) {
                 this.hits++;
                 return true;
@@ -813,7 +989,7 @@ export class RedisAdapter extends EventEmitter {
         try {
             const exists = await this.client.exists(key);
             this.lastSuccessfulOperation = Date.now();
-            
+
             if (exists === 1) {
                 this.hits++;
                 return true;
@@ -859,7 +1035,7 @@ export class RedisAdapter extends EventEmitter {
 
         try {
             const keys = await this.client.keys(pattern);
-            
+
             if (keys.length === 0) {
                 return 0;
             }
@@ -901,8 +1077,8 @@ export class RedisAdapter extends EventEmitter {
 
         for (const key of keys) {
             const cached = this.readCache.get(key);
-            if (cached && 
-                now - cached.timestamp < this.READ_CACHE_TTL && 
+            if (cached &&
+                now - cached.timestamp < this.READ_CACHE_TTL &&
                 cached.entry.e > nowSec) {
                 try {
                     const deserialized = DocumentSerializer.deserialize(cached.entry.d);
@@ -926,7 +1102,7 @@ export class RedisAdapter extends EventEmitter {
 
             for (let i = 0; i < keysToFetch.length; i++) {
                 const key = keysToFetch[i];
-                
+
                 if (values[i]) {
                     try {
                         const entry: CacheEntry = JSON.parse(values[i]!);
@@ -934,13 +1110,13 @@ export class RedisAdapter extends EventEmitter {
                         if (entry.e > nowSec) {
                             const deserialized = DocumentSerializer.deserialize(entry.d);
                             result.set(key, deserialized);
-                            
+
                             this.readCache.set(key, { entry, timestamp: now });
                             this.hits++;
                         } else {
                             this.misses++;
                             setImmediate(() => {
-                                this.delete(key).catch(() => {});
+                                this.delete(key).catch(() => { });
                             });
                         }
                     } catch (error) {
@@ -959,14 +1135,14 @@ export class RedisAdapter extends EventEmitter {
 
         } catch (error: any) {
             this.errors++;
-            
+
             const fetchedKeys = result.size - (keys.length - keysToFetch.length);
             this.misses += keysToFetch.length - fetchedKeys;
-            
+
             if (this.debugMode) {
                 console.error('Redis MGET error:', error.message);
             }
-            
+
             return result;
         }
     }
@@ -1011,7 +1187,7 @@ export class RedisAdapter extends EventEmitter {
                         pipeline.setex(key, effectiveTtl, serialized);
 
                         this.readCache.set(key, { entry, timestamp: now });
-                        
+
                         successCount++;
                     }
                 } catch (error) {
@@ -1024,7 +1200,7 @@ export class RedisAdapter extends EventEmitter {
             await pipeline.exec();
             this.lastSuccessfulOperation = Date.now();
             this.cleanReadCache();
-            
+
             return successCount;
 
         } catch (error: any) {
@@ -1049,11 +1225,11 @@ export class RedisAdapter extends EventEmitter {
 
             const pattern = this.config.redis.keyPrefix + '*';
             const deleted = await this.deletePattern(pattern);
-            
+
             if (this.debugMode) {
                 console.log(`Cleared ${deleted} entries`);
             }
-            
+
             return true;
         } catch (error: any) {
             this.errors++;
@@ -1130,11 +1306,21 @@ export class RedisAdapter extends EventEmitter {
             this.healthCheckInterval = undefined;
         }
 
+        if (this.subscriber) {
+            try {
+                await this.subscriber.unsubscribe(this.INVALIDATION_CHANNEL);
+                this.subscriber.disconnect();
+            } catch {
+                // Ignore disconnect errors
+            }
+            this.subscriber = null;
+        }
+
         if (this.client) {
             this.connected = false;
             await this.client.quit();
             this.client = null;
-            
+
             if (this.debugMode) {
                 console.log('Redis disconnected');
             }
