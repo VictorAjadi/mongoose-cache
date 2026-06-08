@@ -1,8 +1,8 @@
-# 🚀 @mongoose-cache
+# 🚀 @mongoose-performance-cache
 
 **Dramatically faster Mongoose queries with production-grade, smart-invalidation caching.**
 
-`@mongoose-cache` is a professional caching layer for Node.js and Bun that intercepts Mongoose queries (`find`, `aggregate`, `count`, `distinct`) and intelligently invalidates them on writes. Built for high-concurrency systems, it reduces database load by up to **90%** while providing sub-millisecond response times—without cache thrashing.
+`@mongoose-performance-cache` is a professional caching layer for Node.js and Bun that intercepts Mongoose queries (`find`, `aggregate`, `count`, `distinct`) and intelligently invalidates them on writes. Built for high-concurrency systems, it reduces database load by up to **90%** while providing sub-millisecond response times—without cache thrashing.
 
 ---
 
@@ -22,9 +22,9 @@
 ## 📦 Installation
 
 ```bash
-npm install @mongoose-cache
+npm install @mongoose-performance-cache
 # OR
-bun add @mongoose-cache
+bun add @mongoose-performance-cache
 ```
 
 **Requirements:**
@@ -39,7 +39,7 @@ bun add @mongoose-cache
 ### 1. Initialize Once (e.g., `lib/cache.ts`)
 
 ```typescript
-import { initCache } from '@mongoose-cache';
+import { initCache } from '@mongoose-performance-cache';
 
 export const cache = initCache({
   ttl: 600, // 10 minutes
@@ -122,7 +122,7 @@ Cache writes and invalidation operations are automatically grouped into short ti
 
 ### 🧠 Query-Aware Smart Invalidation
 
-Traditional caching libraries invalidate **entire collections** when any record changes. `@mongoose-cache` uses pattern matching to determine if an update actually affects a cached query.
+Traditional caching libraries invalidate **entire collections** when any record changes. `@mongoose-performance-cache` uses pattern matching to determine if an update actually affects a cached query.
 
 **Example:**
 
@@ -192,7 +192,7 @@ These popular queries remain fast even during traffic spikes.
 
 ### 🛡️ Memory Safety System
 
-Production systems fail when memory usage grows unchecked. `@mongoose-cache` continuously monitors heap pressure and can:
+Production systems fail when memory usage grows unchecked. `@mongoose-performance-cache` continuously monitors heap pressure and can:
 
 - Flush pending invalidation queues
 - Release unused cache entries
@@ -428,7 +428,7 @@ The benchmark:
 
 ## 🚨 Design Philosophy
 
-`@mongoose-cache` was built around real production failure modes:
+`@mongoose-performance-cache` was built around real production failure modes:
 
 - **Cache stampedes:** Single query, shared response
 - **Memory leaks:** Automatic circuit breakers and pressure monitoring
