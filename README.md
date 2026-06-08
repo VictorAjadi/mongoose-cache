@@ -1,8 +1,8 @@
-# 🚀 @mongoose-cache
+# 🚀 @mongoose-performance-cache
 
 **Dramatically faster Mongoose queries with production-grade, smart-invalidation caching.**
 
-`@mongoose-cache` is a professional, transparent caching layer built for modern Node.js and Bun environments. It intercepts Mongoose queries (`find`, `aggregate`, `count`, `distinct`) and intelligently invalidates them on writes, reducing database load by up to **90%** while providing sub-millisecond response times.
+`@mongoose-performance-cache` is a professional, transparent caching layer built for modern Node.js and Bun environments. It intercepts Mongoose queries (`find`, `aggregate`, `count`, `distinct`) and intelligently invalidates them on writes, reducing database load by up to **90%** while providing sub-millisecond response times.
 
 ---
 
@@ -20,20 +20,20 @@
 ## 📦 Installation
 
 ```bash
-npm install @mongoose-cache
+npm install @mongoose-performance-cache
 # OR
-bun add @mongoose-cache
+bun add @mongoose-performance-cache
 ```
 
 ---
 
 ## 🚀 Quick Start (Single Instance Pattern)
 
-The recommended way to use `@mongoose-cache` is to initialize it once and share it across your application.
+The recommended way to use `@mongoose-performance-cache` is to initialize it once and share it across your application.
 
 ```typescript
 // 1. Initialize once (e.g., in lib/cache.ts)
-import { initCache } from '@mongoose-cache';
+import { initCache } from '@mongoose-performance-cache';
 
 export const cache = initCache({
   ttl: 600, // 10 minutes
@@ -91,11 +91,11 @@ const users = await User.find({ name: 'Alice' }); // Automatically cached
 
 ---
 
-## 🧠 Why @mongoose-cache?
+## 🧠 Why @mongoose-performance-cache? 
 
 Standard caching often clears the *entire* model cache whenever *any* record is updated. This results in "cache thrashing." 
 
-`@mongoose-cache` uses **Optimized Query Matching**:
+`@mongoose-performance-cache` uses **Optimized Query Matching**:
 1. When you query: `User.find({ status: 'active' })`, the library indexes that specific pattern.
 2. When you update: a user with `{ status: 'inactive' }`, the library determines if it *could* have affected your previous query.
 3. If not affected, the cache stays hot!

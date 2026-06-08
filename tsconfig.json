@@ -5,6 +5,7 @@
     "moduleResolution": "bundler",
     "lib": ["ESNext"],
     "types": ["node"],
+    "rootDir": "./src",
     "outDir": "./dist",
     "strict": true,
     "declaration": true,
@@ -16,6 +17,6 @@
     "esm": true,
     "experimentalSpecifierResolution": "node"
   },
-  "include": ["src/**/*", "scripts/**/*"],
+  "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
 }
