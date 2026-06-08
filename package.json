@@ -1,6 +1,6 @@
 {
-  "name": "mongoose-cache-lib",
-  "version": "1.0.0",
+  "name": "mongoose-performance-cache",
+  "version": "1.1.0",
   "description": "Automatic MongoDB query caching for Node.js and Bun that wraps your Mongoose schemas to handle cache storage, live updates, and smart invalidation seamlessly.",
   "keywords": [
     "mongoose",
@@ -24,6 +24,11 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
+  },
+  "homepage": "https://github.com/VictorAjadi/mongoose-cache",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/VictorAjadi/mongoose-cache"
   },
   "scripts": {
     "build": "tsc",
