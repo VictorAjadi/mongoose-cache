@@ -1,6 +1,6 @@
 {
-  "name": "mongoose-cache-lib",
-  "version": "1.0.1",
+  "name": "mongoose-cache",
+  "version": "1.0.0",
   "description": "Automatic MongoDB query caching for Node.js and Bun that wraps your Mongoose schemas to handle cache storage, live updates, and smart invalidation seamlessly.",
   "keywords": [
     "mongoose",
