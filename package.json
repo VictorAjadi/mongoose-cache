@@ -1,6 +1,21 @@
 {
   "name": "mongoose-cache-lib",
   "version": "1.0.0",
+  "description": "Automatic MongoDB query caching for Node.js and Bun that wraps your Mongoose schemas to handle cache storage, live updates, and smart invalidation seamlessly.",
+  "keywords": [
+    "mongoose",
+    "cache",
+    "redis",
+    "query-caching",
+    "smart-invalidation",
+    "lru",
+    "performance",
+    "mongodb",
+    "aggregation",
+    "nodejs",
+    "bun"
+  ],
+  "author": "<victorajadi2004@gmail.com>_victorajadi",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -27,5 +42,6 @@
     "mongoose": "^9.6.3",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3"
-  }
+  },
+  "license": "MIT"
 }
