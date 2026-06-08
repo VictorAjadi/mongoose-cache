@@ -25,6 +25,11 @@
       "types": "./dist/index.d.ts"
     }
   },
+  "homepage": "https://github.com/VictorAjadi/mongoose-cache",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/VictorAjadi/mongoose-cache"
+  },
   "scripts": {
     "build": "tsc",
     "test": "tsx src/documentSerializer.test.ts",
