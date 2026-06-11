@@ -538,7 +538,7 @@ class JSONSchemaValidator {
         const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(?:Z|([+-])(\d{2}):(\d{2}))$/);
         if (!match) return false;
 
-        const [, year, month, day, hour, minute, second, ms, tzSign, tzHour, tzMinute] = match;
+        const [, year, month, day, hour, minute, second, _ms, _tzSign, tzHour, tzMinute] = match;
 
         const y = parseInt(year, 10);
         const m = parseInt(month, 10);
@@ -589,7 +589,7 @@ class JSONSchemaValidator {
         const match = value.match(/^(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(?:Z|([+-])(\d{2}):(\d{2}))?$/);
         if (!match) return false;
 
-        const [, hour, minute, second, ms, tzSign, tzHour, tzMinute] = match;
+        const [, hour, minute, second, _ms, _tzSign, tzHour, tzMinute] = match;
 
         const h = parseInt(hour, 10);
         const min = parseInt(minute, 10);
@@ -706,11 +706,10 @@ class JSONSchemaValidator {
         if (value === '::1') return true;
 
         const parts = value.split(':');
-        let emptyGroups = 0;
-        let hasDoubleColon = false;
+
 
         if (value.includes('::')) {
-            hasDoubleColon = true;
+
             const groups = value.split('::');
             if (groups.length > 2) return false;
 
@@ -720,7 +719,6 @@ class JSONSchemaValidator {
 
             if (totalParts > 7) return false;
 
-            emptyGroups = 8 - totalParts;
 
             for (const part of leftParts) {
                 if (!this.isValidIPv6Group(part)) return false;

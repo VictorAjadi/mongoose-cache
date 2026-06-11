@@ -124,7 +124,6 @@ class MetricsCollector {
 
 // Global models to prevent recompilation
 let globalModels: any = null;
-let globalCache: MongooseCache | null = null;
 
 function getModels(cache: MongooseCache) {
     if (globalModels) {
@@ -167,7 +166,6 @@ function getModels(cache: MongooseCache) {
 
 class StressTestWorker {
     private config: StressTestConfig;
-    private cache: MongooseCache;
     private models: any;
     private metricsCollector: MetricsCollector;
     private isRunning: boolean = true;
@@ -176,7 +174,6 @@ class StressTestWorker {
     constructor(config: StressTestConfig, metricsCollector: MetricsCollector, cache: MongooseCache) {
         this.config = config;
         this.metricsCollector = metricsCollector;
-        this.cache = cache;
         this.models = getModels(cache);
     }
 
@@ -353,7 +350,6 @@ class MultiClientStressTest {
     private testStartTime: number = 0;
     private testEndTime: number = 0;
     private intervalId: NodeJS.Timeout | null = null;
-    private isRunning: boolean = false;
 
     constructor(config: StressTestConfig) {
         this.config = config;
@@ -555,7 +551,6 @@ class MultiClientStressTest {
 
     private async cleanup() {
         console.log('\n🧹 Cleaning up...');
-        this.isRunning = false;
 
         if (this.intervalId) {
             clearInterval(this.intervalId);
@@ -600,7 +595,7 @@ class MultiClientStressTest {
             console.log('\n🔥 Starting stress test...');
             this.testStartTime = perf.now();
             this.testEndTime = this.testStartTime + (this.config.testDuration * 1000);
-            this.isRunning = true;
+
 
             this.startMetricsReporting();
             await this.rampUpClients();
@@ -625,7 +620,7 @@ class MultiClientStressTest {
 async function main() {
     console.log('\n🎯 @mongoose-cache Multi-Client Stress Test\n');
 
-    const testType = await question('Choose test type (1: Full Stress Test, 2: Stampede Test Only, default: 1): ');
+    await question('Choose test type (1: Full Stress Test, 2: Stampede Test Only, default: 1): ');
 
     const mongoUri = await question('Enter MongoDB URI (default: mongodb://localhost:27017/stress-test): ') || 'mongodb://localhost:27017/stress-test';
     const backend = (await question('Choose Backend (memory/redis, default: memory): ')).toLowerCase() || 'memory';

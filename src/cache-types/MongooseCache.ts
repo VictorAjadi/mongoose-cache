@@ -283,7 +283,7 @@ export class MongooseCache {
      * Memory protection: canAcceptQueueEntry() acts as a circuit breaker.
      * If heap is critical, a flush is forced before accepting new entries.
      */
-    private updateCacheInBackground(key: string, doc: any, ttl?: number, isLean?: boolean): void {
+    private updateCacheInBackground(key: string, doc: any, _ttl?: number, isLean?: boolean): void {
         if (this.isDisconnecting) return;
 
         if (!this.canAcceptQueueEntry()) {

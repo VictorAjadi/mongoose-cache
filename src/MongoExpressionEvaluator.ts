@@ -185,7 +185,7 @@ class MongoExpressionEvaluator {
             // Field path reference
             default:
                 if (operator.startsWith('$')) {
-                    return (op: any, ctx: EvaluationContext) => {
+                    return (_op: any, ctx: EvaluationContext) => {
                         const value = this.getFieldValue(operator.substring(1), ctx.document);
                         return value !== undefined && value !== null;
                     };
@@ -839,7 +839,7 @@ class MongoExpressionEvaluator {
             case '$isoDayOfWeek': return ensureDate(resolve(value)).getUTCDay() || 7;
 
             case '$dateTrunc': {
-                const { date, unit, binSize = 1, timezone } = value;
+                const { date, unit, timezone } = value;
                 const d = ensureDate(resolve(date));
                 const truncated = new Date(d);
 
