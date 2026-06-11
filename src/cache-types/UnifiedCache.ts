@@ -22,7 +22,7 @@
 //
 // ============================================================================
 
-import { createHash } from 'node:crypto';
+import CryptoUtil from '../CryptoUtil';
 import { CacheConfig, CacheStats, DEFAULT_CONFIG } from '../config';
 import { MemoryCache } from './MemoryCache';
 import { RedisAdapter } from '../adapters/RedisAdapter';
@@ -43,7 +43,7 @@ export class UnifiedCache {
     private config: Required<CacheConfig>;
     private memoryCache: MemoryCache;
     private redisAdapter: RedisAdapter | null = null;
-    
+
     // Redis state management
     private useRedis: boolean = false;
     private redisInitialized: boolean = false;
@@ -65,7 +65,7 @@ export class UnifiedCache {
      */
     constructor(config: CacheConfig = {}) {
         this.config = { ...DEFAULT_CONFIG, ...config } as Required<CacheConfig>;
-        
+
         // Always initialize memory cache as fallback (works in all runtimes)
         this.memoryCache = new MemoryCache(this.config);
 
@@ -82,6 +82,7 @@ export class UnifiedCache {
             const strategy = this.useRedis ? 'Redis (with memory fallback)' : 'Memory only';
             console.log(`[UnifiedCache] Initialized with strategy: ${strategy}`);
             console.log(`[UnifiedCache] Memory Threshold: ${this.config.memoryThreshold}%`);
+            console.log(`[UnifiedCache] Crypto implementation: ${CryptoUtil.getImplementation()}`);
         }
     }
 
@@ -169,11 +170,11 @@ export class UnifiedCache {
                 if (connected) {
                     this.redisInitialized = true;
                     this.redisInitializing = false;
-                    
+
                     if (this.config.debug) {
                         console.log('[Redis] Cache active and ready');
                     }
-                    
+
                     return true;
                 }
 
@@ -204,7 +205,7 @@ export class UnifiedCache {
                     this.useRedis = false;
 
                     if (this.redisAdapter) {
-                        await this.redisAdapter.disconnect().catch(() => {});
+                        await this.redisAdapter.disconnect().catch(() => { });
                         this.redisAdapter = null;
                     }
 
@@ -247,7 +248,7 @@ export class UnifiedCache {
             try {
                 const result = await Promise.race([
                     this.redisInitPromise,
-                    new Promise<boolean>((resolve) => 
+                    new Promise<boolean>((resolve) =>
                         setTimeout(() => resolve(false), timeoutMs)
                     )
                 ]);
@@ -299,7 +300,7 @@ export class UnifiedCache {
 
             if (cache instanceof RedisAdapter) {
                 const result = await cache.set(key, value, ttl, isLean);
-                
+
                 // Only fall back if Redis is truly disconnected
                 if (!result) {
                     const stats = this.redisAdapter?.getStats();
@@ -310,7 +311,7 @@ export class UnifiedCache {
                         return this.memoryCache.set(key, value, ttl, isLean);
                     }
                 }
-                
+
                 return result;
             } else {
                 return cache.set(key, value, ttl, isLean);
@@ -357,7 +358,7 @@ export class UnifiedCache {
 
             if (cache instanceof RedisAdapter) {
                 const result = await cache.get<T>(key);
-                
+
                 // Only fall back if Redis is truly disconnected AND result is null
                 if (result === null) {
                     const stats = this.redisAdapter?.getStats();
@@ -368,7 +369,7 @@ export class UnifiedCache {
                         return this.memoryCache.get<T>(key);
                     }
                 }
-                
+
                 return result;
             } else {
                 return cache.get<T>(key);
@@ -562,7 +563,7 @@ export class UnifiedCache {
                 await this.redisAdapter.clear();
             }
             this.memoryCache.clear();
-            
+
             if (this.config.debug) {
                 console.log('[Cache] Cache cleared');
             }
@@ -621,11 +622,10 @@ export class UnifiedCache {
             } else {
                 // FAST QUERY HASH: Avoid deep JSON.stringify for complex queries
                 // We use a shallow signature + length for speed, then hash only if necessary
-                const querySignature = `${Object.keys(query).length}:${typeof query}`;
                 if (query._id) {
-                   parts.push(`q:${String(query._id)}`);
+                    parts.push(`q:${String(query._id)}`);
                 } else {
-                   parts.push(`q:${this.fastHash(query)}`);
+                    parts.push(`q:${this.fastHash(query)}`);
                 }
             }
         } else if (query !== undefined) {
@@ -646,10 +646,14 @@ export class UnifiedCache {
 
 
     /**
-     * Fast MD5 hash for cache keys
+     * Fast runtime-agnostic hash for cache keys
      *
-     * Used to create deterministic short hashes of complex objects.
-     * Takes first 12 characters of MD5 digest for balance of uniqueness and length.
+     * Uses CryptoUtil for cross-runtime compatibility:
+     * - Node.js: Native crypto.createHash('md5') - very fast
+     * - Bun: Deterministic simple hash - excellent distribution
+     * - WebCrypto: Fast simple hash fallback
+     *
+     * Takes first 12 characters for balance of uniqueness and length.
      *
      * @param data - Object or string to hash
      * @returns 12-character hash string
@@ -663,8 +667,10 @@ export class UnifiedCache {
             }
             return (h >>> 0).toString(16);
         }
-        const str = typeof data === 'string' ? data : JSON.stringify(data);
-        return createHash('md5').update(str, 'utf8').digest('hex').substring(0, 12);
+
+        // Use CryptoUtil for runtime-agnostic hashing
+        // Works seamlessly in Node.js (native MD5) and Bun (simple hash)
+        return CryptoUtil.hash(data, 12);
     }
 
     /**
@@ -803,50 +809,50 @@ export class UnifiedCache {
                 const redisStats = this.redisAdapter.getStats();
                 const memoryInfo = await this.redisAdapter.getMemoryInfo();
                 const processMemory = MemoryMonitor.getMemoryReport();
-                
+
                 // Build comprehensive stats object for Redis backend
                 return {
                     // Cache identification
                     cacheType: 'redis',
-                    
+
                     // Redis connection status
                     redisConnected: redisStats.connected,
                     redisMemoryUsageMB: +(memoryInfo.used / 1048576).toFixed(2),
                     redisMaxMemoryMB: memoryInfo.max > 0 ? +(memoryInfo.max / 1048576).toFixed(2) : 30,
-                    
+
                     // Hit/miss metrics (from RedisAdapter)
                     hits: redisStats.hits || 0,
                     misses: redisStats.misses || 0,
                     hitRate: +(redisStats.hitRate || 0).toFixed(2),
-                    
+
                     // Cache size metrics
                     keys: 0, // Would require DBSIZE call - deferred for performance
                     cachedDataMB: +(memoryInfo.used / 1048576).toFixed(2),
                     avgItemSizeMB: 0,
                     memoryUtilization: memoryInfo.max > 0 ? +((memoryInfo.used / memoryInfo.max) * 100).toFixed(2) : 0,
-                    
+
                     // Eviction and invalidation
                     evictions: 0, // Not tracked separately in Redis adapter
                     invalidations: 0, // Tracked at query level
                     underMemoryPressure: redisStats.underMemoryPressure || false,
-                    
+
                     // Configuration snapshot
                     maxKeys: this.config.maxKeys,
                     maxItemSizeMB: this.config.maxItemSizeMB,
                     ttlSeconds: this.config.ttl,
                     smartInvalidation: this.config.enableSmartInvalidation,
-                    
+
                     // Process memory (via Unified MemoryMonitor)
                     heapUsedMB: +(processMemory.heapUsed / 1048576).toFixed(2),
                     heapTotalMB: +(processMemory.heapTotal / 1048576).toFixed(2),
                     rssMemoryMB: +(processMemory.rss / 1048576).toFixed(2),
                 } as CacheStats;
-                
+
             } catch (error: any) {
                 if (this.config.debug) {
                     console.error('[Cache] Error getting Redis stats:', error.message);
                 }
-                
+
                 // Return error state - DON'T fall back to memory stats
                 // This preserves data integrity and signals to caller that Redis is down
                 return {
@@ -875,10 +881,10 @@ export class UnifiedCache {
         // - Redis initialization failed
         // - Redis is temporarily unavailable
         const memoryStats = this.memoryCache.getStats();
-        
+
         // Supplement with process memory info for consistency
         const processMemory = MemoryMonitor.getMemoryReport();
-        
+
         return {
             ...memoryStats,
             heapUsedMB: +(processMemory.heapUsed / 1048576).toFixed(2),
@@ -906,7 +912,7 @@ export class UnifiedCache {
             console.log('[Cache] Disconnected');
         }
     }
-    
+
     /**
      * Reconnect to Redis cache
      *

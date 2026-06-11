@@ -1,4 +1,3 @@
-import { URL } from 'node:url';
 /**
  * High-Performance JSON Schema Validator
  * Optimized for speed with complete JSON Schema Draft-07 support
@@ -20,7 +19,7 @@ class JSONSchemaValidator {
 
     private static readonly FORMAT_VALIDATORS = new Map<string, (value: string) => boolean>();
     private static readonly TYPE_CACHE = new Map<any, string>();
-    
+
     static {
         this.initializeFormatValidators();
     }
@@ -108,28 +107,28 @@ class JSONSchemaValidator {
     private static validateType(value: any, type: string | string[]): boolean {
         const types = Array.isArray(type) ? type : [type];
         const actualType = this.getJsonType(value);
-        
+
         for (let i = 0; i < types.length; i++) {
             if (types[i] === actualType) return true;
             if (types[i] === 'number' && actualType === 'integer') return true;
         }
-        
+
         return false;
     }
 
     private static getJsonType(value: any): string {
         if (value === null) return 'null';
         if (Array.isArray(value)) return 'array';
-        
+
         const type = typeof value;
-        
+
         if (type === 'number') {
             if (Number.isInteger(value) && Number.isFinite(value)) {
                 return 'integer';
             }
             return 'number';
         }
-        
+
         return type;
     }
 
@@ -235,7 +234,7 @@ class JSONSchemaValidator {
 
                 if (len > itemsLen) {
                     if (schema.additionalItems === false) return false;
-                    
+
                     if (typeof schema.additionalItems === 'object') {
                         for (let i = itemsLen; i < len; i++) {
                             if (!this.validateSchema(value[i], schema.additionalItems, `${path}[${i}]`, visited)) {
@@ -323,7 +322,7 @@ class JSONSchemaValidator {
 
             for (let i = 0; i < keys.length; i++) {
                 const key = keys[i];
-                
+
                 if (definedProps && definedProps.has(key)) continue;
 
                 let matchesPattern = false;
@@ -341,7 +340,7 @@ class JSONSchemaValidator {
                         visited.delete(value);
                         return false;
                     }
-                    
+
                     if (typeof schema.additionalProperties === 'object') {
                         if (!this.validateSchema(value[key], schema.additionalProperties, `${path}.${key}`, visited)) {
                             visited.delete(value);
@@ -356,7 +355,7 @@ class JSONSchemaValidator {
             for (const prop in schema.dependencies) {
                 if (prop in value) {
                     const dependency = schema.dependencies[prop];
-                    
+
                     if (Array.isArray(dependency)) {
                         for (let i = 0; i < dependency.length; i++) {
                             if (!(dependency[i] in value)) {
@@ -403,26 +402,26 @@ class JSONSchemaValidator {
 
     private static validateOneOf(value: any, schemas: any[], path: string, visited: Set<any>): boolean {
         let validCount = 0;
-        
+
         for (let i = 0; i < schemas.length; i++) {
             if (this.validateSchema(value, schemas[i], path, visited)) {
                 validCount++;
                 if (validCount > 1) return false;
             }
         }
-        
+
         return validCount === 1;
     }
 
     private static validateIfThenElse(value: any, schema: any, path: string, visited: Set<any>): boolean {
         const ifResult = this.validateSchema(value, schema.if, path, visited);
-        
+
         if (ifResult && schema.then !== undefined) {
             return this.validateSchema(value, schema.then, path, visited);
         } else if (!ifResult && schema.else !== undefined) {
             return this.validateSchema(value, schema.else, path, visited);
         }
-        
+
         return true;
     }
 
@@ -908,7 +907,7 @@ class JSONSchemaValidator {
             try {
                 const regex = new RegExp(schema.pattern);
                 this.cache.regex.set(schema.pattern, regex);
-            } catch {}
+            } catch { }
         }
 
         if (schema.patternProperties) {
@@ -916,7 +915,7 @@ class JSONSchemaValidator {
                 try {
                     const regex = new RegExp(pattern);
                     this.cache.regex.set(pattern, regex);
-                } catch {}
+                } catch { }
             }
         }
 
