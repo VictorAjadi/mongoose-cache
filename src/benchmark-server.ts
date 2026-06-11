@@ -71,7 +71,7 @@ app.get('/projects/:id', async (req, res) => {
 });
 
 // CACHED: Complex Analytics Aggregation
-app.get('/stats', async (req, res) => {
+app.get('/stats', async (_req, res) => {
     const start = performance.now();
     const stats = await Project.aggregate([
         { $unwind: '$milestones' },

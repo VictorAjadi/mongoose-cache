@@ -1,5 +1,5 @@
 
-import { ObjectId } from 'mongodb';
+
 
 /**
  * High-performance serialization utility for Mongoose documents.

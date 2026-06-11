@@ -1,0 +1,13 @@
+src/JSONSchemaValidator.ts(541,58): error TS6133: 'ms' is declared but its value is never read.
+src/JSONSchemaValidator.ts(541,62): error TS6133: 'tzSign' is declared but its value is never read.
+src/JSONSchemaValidator.ts(592,40): error TS6133: 'ms' is declared but its value is never read.
+src/JSONSchemaValidator.ts(592,44): error TS6133: 'tzSign' is declared but its value is never read.
+src/JSONSchemaValidator.ts(709,13): error TS6133: 'emptyGroups' is declared but its value is never read.
+src/JSONSchemaValidator.ts(710,13): error TS6133: 'hasDoubleColon' is declared but its value is never read.
+src/MongoExpressionEvaluator.ts(188,29): error TS6133: 'op' is declared but its value is never read.
+src/MongoExpressionEvaluator.ts(842,37): error TS6133: 'binSize' is declared but its value is never read.
+src/OptimizedQueryMatcher.ts(178,41): error TS6133: 'doc' is declared but its value is never read.
+src/OptimizedQueryMatcher.ts(230,54): error TS6133: 'query' is declared but its value is never read.
+src/OptimizedQueryMatcher.ts(237,50): error TS6133: 'query' is declared but its value is never read.
+src/SizeCalculator.ts(7,33): error TS6133: 'value' is declared but its value is never read.
+src/SizeCalculator.ts(12,36): error TS6133: 'value' is declared but its value is never read.

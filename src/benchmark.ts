@@ -132,7 +132,7 @@ async function runBenchmark() {
         const stampedeStart = performance.now();
 
         // Execute 20 identical queries at the exact same time
-        const results = await Promise.all(
+        await Promise.all(
             Array.from({ length: 20 }, () =>
                 Project.findById(project._id)
                     .populate({ path: 'ownerId', populate: { path: 'orgId' } })

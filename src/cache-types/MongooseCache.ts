@@ -204,12 +204,6 @@ export class MongooseCache {
         }, 5000);
     }
 
-    /**
-     * @deprecated Use MemoryMonitor.getHeapLimit directly if needed
-     */
-    private getHeapLimit(): number {
-        return MemoryMonitor.getHeapLimit();
-    }
 
 
     /**
@@ -291,7 +285,7 @@ export class MongooseCache {
      * @param ttl - Optional time-to-live (uses config default if omitted)
      * @param isLean - Whether this is a lean result (enables memory fast-path)
      */
-    private updateCacheInBackground(key: string, doc: any, ttl?: number, isLean: boolean = false): void {
+    private updateCacheInBackground(key: string, doc: any, _ttl?: number, _isLean: boolean = false): void {
         if (this.isDisconnecting) return;
 
         // Circuit breaker: Detect memory pressure and force immediate flush
@@ -836,12 +830,10 @@ export class MongooseCache {
 
         const {
             skipEmpty = true,
-            enableSmartInvalidation = this.config.enableSmartInvalidation,
         } = options;
 
         const self = this;
         const isSmartInvalidation = this.config.enableSmartInvalidation;
-        const ttl = this.config.ttl;
 
         const cache: UnifiedCache = this.cache;
         const updateCacheInBackground = this.updateCacheInBackground.bind(this);

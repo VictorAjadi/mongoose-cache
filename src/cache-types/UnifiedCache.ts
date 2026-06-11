@@ -640,7 +640,7 @@ export class UnifiedCache {
             } else {
                 // FAST QUERY HASH: Avoid deep JSON.stringify for complex queries
                 // We use a shallow signature + length for speed, then hash only if necessary
-                const querySignature = `${Object.keys(query).length}:${typeof query}`;
+
                 if (query._id) {
                     parts.push(`q:${String(query._id)}`);
                 } else {

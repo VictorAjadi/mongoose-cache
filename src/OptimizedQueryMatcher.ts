@@ -175,7 +175,7 @@ export class OptimizedQueryMatcher {
             
             // Miscellaneous
             case '$rand': return () => Math.random() < 0.5; // Random selection
-            case '$sampleRate': return (doc: any, val: any) => Math.random() < val;
+            case '$sampleRate': return (_doc: any, val: any) => Math.random() < val;
             
             default: return () => true;
         }
@@ -227,14 +227,14 @@ export class OptimizedQueryMatcher {
     }
 
     // Simplified geospatial helpers (basic implementations)
-    private static checkGeoIntersects(docValue: any, query: any): boolean {
+    private static checkGeoIntersects(docValue: any, _query: any): boolean {
         // Simplified implementation - in real scenarios, you'd use proper geospatial libraries
         if (!docValue || !docValue.coordinates) return false;
         // This would need proper geometric intersection logic
         return true;
     }
 
-    private static checkGeoWithin(docValue: any, query: any): boolean {
+    private static checkGeoWithin(docValue: any, _query: any): boolean {
         // Simplified implementation
         if (!docValue || !docValue.coordinates) return false;
         // This would need proper geometric containment logic
