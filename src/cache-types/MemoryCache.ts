@@ -1,7 +1,6 @@
 import { EventEmitter } from 'events';
 import { HyperHashMap } from '../hyperhashmap';
 import { CacheConfig, CacheEntry, CacheStats, IndexEntry } from '../config';
-import { SizeCalculator } from '../SizeCalculator';
 import { DocumentSerializer } from '../documentSerializer';
 import { MemoryMonitor } from '../MemoryMonitor';
 
@@ -13,13 +12,13 @@ export class MemoryCache extends EventEmitter {
     private indexes: HyperHashMap<string, IndexEntry>;
     private config: Required<CacheConfig>;
     private debugMode: boolean;
-    
+
     private currentSize: number = 0;
     private hits: number = 0;
     private misses: number = 0;
     private evictions: number = 0;
     private invalidations: number = 0;
-    
+
     private cleanupTimer?: ReturnType<typeof setInterval>;
     private statsTimer?: ReturnType<typeof setInterval>;
     private memoryCheckTimer?: ReturnType<typeof setInterval>;
@@ -44,10 +43,10 @@ export class MemoryCache extends EventEmitter {
         super();
         this.config = config;
         this.debugMode = config.debug;
-        
+
         this.cache = new HyperHashMap<string, CacheEntry>(this.config.maxKeys);
         this.indexes = new HyperHashMap<string, IndexEntry>(1024);
-        
+
         // Calculate target memory size from Node.js heap and threshold
         // and start background tasks.
         // Notes for teams: These background tasks are lightweight and
@@ -76,10 +75,10 @@ export class MemoryCache extends EventEmitter {
      */
     private calculateMaxSize(): void {
         const totalAvailable = MemoryMonitor.getHeapLimit();
-        
+
         // Use threshold percentage of available memory
         this.maxSizeBytes = Math.floor(totalAvailable * (this.config.memoryDropThreshold / 100));
-        
+
         if (this.debugMode) {
             console.log(
                 `[MemoryCache] Component Target: ${(this.maxSizeBytes / 1048576).toFixed(2)}MB ` +
@@ -104,19 +103,19 @@ export class MemoryCache extends EventEmitter {
         this.memoryCheckTimer = setInterval(() => {
             const dropThreshold = this.config.memoryDropThreshold;
             const processThreshold = this.config.memoryThreshold;
-            
+
             // 1. Internal size check (relative to its own target)
             const internalUsagePercent = this.maxSizeBytes > 0 ? (this.currentSize / this.maxSizeBytes) * 100 : 0;
-            
+
             // 2. Global process heap check (the library's circuit breaker)
             const heapUtilization = MemoryMonitor.getHeapUtilization();
-            
+
             const isInternalPressure = internalUsagePercent >= dropThreshold;
             const isProcessPressure = heapUtilization >= processThreshold;
 
             if (isInternalPressure || isProcessPressure) {
                 this.isUnderMemoryPressure = true;
-                
+
                 this.emit('memory-pressure', {
                     current: this.currentSize,
                     max: this.maxSizeBytes,
@@ -136,7 +135,7 @@ export class MemoryCache extends EventEmitter {
                 const now = Date.now();
                 if (now - this.lastEvictionTime >= this.MIN_EVICTION_INTERVAL) {
                     this.lastEvictionTime = now;
-                    
+
                     // Non-blocking eviction
                     setImmediate(() => {
                         this.evictToTarget();
@@ -176,7 +175,7 @@ export class MemoryCache extends EventEmitter {
      */
     private cleanup(): void {
         const now = Math.floor(Date.now() / 1000);
-        
+
         // Process expired queue first
         if (this.expiredKeys.size > 0) {
             let freedSize = 0;
@@ -237,7 +236,7 @@ export class MemoryCache extends EventEmitter {
             // SINGLE PASS: Serialize and calculate size in one tree traversal
             const isPure = isLean && value !== null && !value.$__ && !value._doc;
             const { data: serializedValue, size } = DocumentSerializer.serialize(value);
-            
+
             const isRaw = isPure;
             const maxItemSize = this.config.maxItemSizeMB * 1048576;
 
@@ -303,11 +302,11 @@ export class MemoryCache extends EventEmitter {
         if (entry.e <= now) {
             // Lazy cleanup - add to queue instead of immediate delete
             this.expiredKeys.add(key);
-            
+
             if (this.expiredKeys.size >= this.MAX_EXPIRED_QUEUE) {
                 setImmediate(() => this.cleanup());
             }
-            
+
             this.misses++;
             return null;
         }
@@ -381,7 +380,7 @@ export class MemoryCache extends EventEmitter {
             if (entry && entry.e > now) {
                 entry.h++;
                 entry.a = now;
-                
+
                 try {
                     result.set(key, DocumentSerializer.deserialize(entry.d));
                     this.hits++;
@@ -427,13 +426,13 @@ export class MemoryCache extends EventEmitter {
 
         if (!regex) {
             regex = this.patternToRegex(pattern);
-            
+
             if (this.regexCache.size >= this.MAX_REGEX_CACHE) {
                 // Clear oldest
                 const firstKey = this.regexCache.keys().next().value;
                 this.regexCache.delete(firstKey!);
             }
-            
+
             this.regexCache.set(pattern, regex);
         }
 
@@ -515,7 +514,7 @@ export class MemoryCache extends EventEmitter {
     /**
      * Faster LRU eviction with hybrid scoring
      */
-    private evictLRU(neededSize: number): void {        
+    private evictLRU(neededSize: number): void {
         // Sample-based eviction for speed
         const sampleSize = Math.min(Math.ceil(this.cache.size * 0.3), 1000);
         const entries: Array<[string, CacheEntry]> = [];
