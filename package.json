@@ -17,12 +17,14 @@
   ],
   "author": "<victorajadi2004@gmail.com>_victorajadi",
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.cjs"
     }
   },
   "homepage": "https://github.com/VictorAjadi/mongoose-cache",
@@ -31,7 +33,7 @@
     "url": "https://github.com/VictorAjadi/mongoose-cache"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean --external mongoose,ioredis,mongodb,express",
     "test": "tsx src/documentSerializer.test.ts",
     "benchmark": "tsx src/benchmark.ts",
     "benchmark:server": "tsx src/benchmark-server.ts",
@@ -39,12 +41,14 @@
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
+    "@turf/turf": "^7.3.5",
     "@types/express": "^5.0.6",
     "@types/node": "^25.9.1",
     "express": "^5.2.1",
     "ioredis": "^5.11.0",
     "mongodb": "^7.2.0",
     "mongoose": "^9.6.3",
+    "tsup": "^8.3.0",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   },

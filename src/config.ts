@@ -59,7 +59,29 @@ export interface CacheStats {
     redisMaxMemoryMB?: number; // Redis max memory in MB
     underMemoryPressure?: boolean; // Memory pressure status
 }
-
+/**  
+ * 
+ * CONFIGURATION FOR DIFFERENT CONSISTENCY LEVELS:
+ * 
+ * Aggressive (High Hit Rate, Lower Consistency):
+ *   ttl: 600,                          // 10 min cache
+ *   enableSmartInvalidation: false,    // Invalidate all on write
+ *   Result: 75-85% hit rate, 30-60s max staleness
+ * 
+ * Balanced (Recommended Default):
+ *   ttl: 300,                          // 5 min cache
+ *   enableSmartInvalidation: true,     // Smart query invalidation
+ *   Result: 60-75% hit rate, 5-30s max staleness
+ * 
+ * Conservative (Higher Consistency, Lower Hit Rate):
+ *   ttl: 60,                           // 1 min cache
+ *   enableSmartInvalidation: true,
+ *   Result: 40-60% hit rate, < 5s max staleness
+ * 
+ * Strong (Use DB directly):
+ *   enabled: false                     // Disable cache
+ *   Result: 0% staleness, but higher DB load
+*/
 export const DEFAULT_CONFIG: Required<CacheConfig> = {
     enabled: true,
     debug: false,

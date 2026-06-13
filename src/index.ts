@@ -51,12 +51,6 @@ export { MemoryMonitor } from './MemoryMonitor';
 export { default as JSONSchemaValidator } from './JSONSchemaValidator';
 
 // ============================================================================
-// DATA STRUCTURES
-// ============================================================================
-export { HyperHashMap } from './hyperhashmap';
-export { FastArray } from './fastarray';
-
-// ============================================================================
 // CONVENIENCE EXPORTS
 // ============================================================================
 // Re-export types commonly used with MongooseCache

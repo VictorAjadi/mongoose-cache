@@ -2,7 +2,7 @@ import { ObjectId } from "bson";
 import JSONSchemaValidator from "./JSONSchemaValidator";
 import { MongoDocumentUtils } from "./MongoDocumentUtils";
 import MongoExpressionEvaluator from "./MongoExpressionEvaluator";
-
+import * as turf from '@turf/turf'
 export class OptimizedQueryMatcher {
     private static operatorCache = new Map<string, Function>();
 
@@ -13,9 +13,14 @@ export class OptimizedQueryMatcher {
         return this.evaluateConditions(doc, query);
     }
 
+    private static readonly PATH_CACHE = new Map<string, string[]>();
+
     private static evaluateConditions(doc: any, conditions: any): boolean {
-        for (const [field, value] of Object.entries(conditions)) {
-            if (field.startsWith('$')) {
+        // High-speed loop using for...in to avoid entry allocations
+        for (const field in conditions) {
+            const value = conditions[field];
+            // charCode 36 is '$'
+            if (field.charCodeAt(0) === 36) {
                 if (!this.evaluateLogicalOperator(doc, field, value)) {
                     return false;
                 }
@@ -31,15 +36,15 @@ export class OptimizedQueryMatcher {
     private static evaluateLogicalOperator(doc: any, operator: string, value: any): boolean {
         switch (operator) {
             case '$or':
-                return Array.isArray(value) && value.some(condition => 
+                return Array.isArray(value) && value.some(condition =>
                     this.documentMatchesQuery(doc, condition)
                 );
             case '$and':
-                return Array.isArray(value) && value.every(condition => 
+                return Array.isArray(value) && value.every(condition =>
                     this.documentMatchesQuery(doc, condition)
                 );
             case '$nor':
-                return Array.isArray(value) && !value.some(condition => 
+                return Array.isArray(value) && !value.some(condition =>
                     this.documentMatchesQuery(doc, condition)
                 );
             case '$not':
@@ -87,8 +92,8 @@ export class OptimizedQueryMatcher {
     }
 
     private static evaluateFieldOperators(docValue: any, operators: any): boolean {
-        for (const [operator, operatorValue] of Object.entries(operators)) {
-            if (!this.checkOperator(docValue, operator, operatorValue)) {
+        for (const operator in operators) {
+            if (!this.checkOperator(docValue, operator, operators[operator])) {
                 return false;
             }
         }
@@ -99,7 +104,7 @@ export class OptimizedQueryMatcher {
         // Use cached operator functions for performance
         const cacheKey = `${operator}:${typeof operatorValue}`;
         let operatorFn = this.operatorCache.get(cacheKey);
-        
+
         if (!operatorFn) {
             operatorFn = this.createOperatorFunction(operator);
             this.operatorCache.set(cacheKey, operatorFn);
@@ -119,11 +124,11 @@ export class OptimizedQueryMatcher {
             case '$lte': return (doc: any, val: any) => doc != null && doc <= val;
             case '$in': return (doc: any, val: any) => Array.isArray(val) && val.some(v => this.valuesEqual(doc, v));
             case '$nin': return (doc: any, val: any) => !Array.isArray(val) || !val.some(v => this.valuesEqual(doc, v));
-            
+
             // Element Operators
             case '$exists': return (doc: any, val: any) => val ? (doc !== undefined) : (doc === undefined);
             case '$type': return (doc: any, val: any) => this.checkType(doc, val);
-            
+
             // Evaluation Operators
             case '$regex': return (doc: any, val: any) => {
                 try {
@@ -136,7 +141,7 @@ export class OptimizedQueryMatcher {
                 if (!Array.isArray(val) || val.length !== 2) return false;
                 return typeof doc === 'number' && doc % val[0] === val[1];
             };
-            
+
             // Array Operators
             case '$all': return (doc: any, val: any) => {
                 if (!Array.isArray(doc) || !Array.isArray(val)) return false;
@@ -147,13 +152,13 @@ export class OptimizedQueryMatcher {
                 return doc.some(item => this.documentMatchesQuery(item, val));
             };
             case '$size': return (doc: any, val: any) => Array.isArray(doc) && doc.length === val;
-            
+
             // Bitwise Operators
             case '$bitsAllClear': return (doc: any, val: any) => this.checkBits(doc, val, 'allClear');
             case '$bitsAllSet': return (doc: any, val: any) => this.checkBits(doc, val, 'allSet');
             case '$bitsAnyClear': return (doc: any, val: any) => this.checkBits(doc, val, 'anyClear');
             case '$bitsAnySet': return (doc: any, val: any) => this.checkBits(doc, val, 'anySet');
-            
+
             // Geospatial Operators (simplified implementations)
             case '$geoIntersects': return (doc: any, val: any) => this.checkGeoIntersects(doc, val);
             case '$geoWithin': return (doc: any, val: any) => this.checkGeoWithin(doc, val);
@@ -161,22 +166,22 @@ export class OptimizedQueryMatcher {
             case '$nearSphere': return (doc: any, val: any) => this.checkNearSphere(doc, val);
             case '$maxDistance': return () => true; // Used with $near, handled in near logic
             case '$minDistance': return () => true; // Used with $near, handled in near logic
-            
+
             // Additional String Operators
             case '$strcasecmp': return (doc: any, val: any) => {
                 if (typeof doc !== 'string' || typeof val !== 'string') return false;
                 return doc.toLowerCase().localeCompare(val.toLowerCase()) === 0;
             };
-            
+
             // Array Position Operators
             case '$slice': return () => true; // Projection operator, not query operator
             case '$': return () => true; // Positional operator, not query operator
             case '$[]': return () => true; // All positional operator, not query operator
-            
+
             // Miscellaneous
             case '$rand': return () => Math.random() < 0.5; // Random selection
             case '$sampleRate': return (_doc: any, val: any) => Math.random() < val;
-            
+
             default: return () => true;
         }
     }
@@ -194,7 +199,7 @@ export class OptimizedQueryMatcher {
         };
 
         const actualType = getJSType(value);
-        
+
         if (typeof typeSpec === 'string') {
             return actualType === typeSpec;
         } else if (typeof typeSpec === 'number') {
@@ -209,14 +214,14 @@ export class OptimizedQueryMatcher {
         } else if (Array.isArray(typeSpec)) {
             return typeSpec.some(t => this.checkType(value, t));
         }
-        
+
         return false;
     }
 
     // Bitwise operation helpers
     private static checkBits(value: any, mask: any, operation: string): boolean {
         if (typeof value !== 'number' || typeof mask !== 'number') return false;
-        
+
         switch (operation) {
             case 'allClear': return (value & mask) === 0;
             case 'allSet': return (value & mask) === mask;
@@ -234,24 +239,34 @@ export class OptimizedQueryMatcher {
         return true;
     }
 
-    private static checkGeoWithin(docValue: any, _query: any): boolean {
-        // Simplified implementation
-        if (!docValue || !docValue.coordinates) return false;
-        // This would need proper geometric containment logic
-        return true;
+    private static checkGeoWithin(docValue: any, query: any): boolean {
+        try {
+            const docPoint = turf.point([docValue.coordinates[1], docValue.coordinates[0]]);
+
+            // query.geometry should be GeoJSON polygon or similar
+            if (!query.geometry) return false;
+
+            const polygon = turf.polygon(query.geometry.coordinates);
+            return turf.booleanPointInPolygon(docPoint, polygon);
+        } catch (error) {
+            if (typeof (globalThis as any).process !== 'undefined') {
+                console.error('[QueryMatcher] Geospatial calculation failed:', error);
+            }
+            return false;
+        }
     }
 
     private static checkNear(docValue: any, query: any): boolean {
         // Simplified implementation
         if (!docValue || !docValue.coordinates || !query.coordinates) return false;
-        
+
         const [x1, y1] = docValue.coordinates;
         const [x2, y2] = query.coordinates;
         const distance = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
-        
+
         if (query.maxDistance !== undefined && distance > query.maxDistance) return false;
         if (query.minDistance !== undefined && distance < query.minDistance) return false;
-        
+
         return true;
     }
 
@@ -260,41 +275,44 @@ export class OptimizedQueryMatcher {
         return this.checkNear(docValue, query);
     }
     private static getNestedValue(obj: any, path: string): any {
-        if (!path.includes('.')) {
-            return obj?.[path];
+        if (obj == null) return undefined;
+        if (!path.includes('.')) return obj[path];
+
+        let keys = this.PATH_CACHE.get(path);
+        if (!keys) {
+            keys = path.split('.');
+            if (this.PATH_CACHE.size < 2000) this.PATH_CACHE.set(path, keys);
         }
-        
-        const keys = path.split('.');
+
         let current = obj;
-        
-        for (const key of keys) {
+        for (let i = 0; i < keys.length; i++) {
             if (current == null) return undefined;
-            current = current[key];
+            current = current[keys[i]];
         }
-        
+
         return current;
     }
     private static valuesEqual(a: any, b: any): boolean {
         if (a === b) return true;
         if (a == null || b == null) return a === b;
-        
+
         // Handle ObjectId comparison
-        if (a instanceof ObjectId || b instanceof ObjectId || 
+        if (a instanceof ObjectId || b instanceof ObjectId ||
             MongoDocumentUtils.isValidObjectId(a) || MongoDocumentUtils.isValidObjectId(b)) {
             return MongoDocumentUtils.compareIds(a, b);
         }
-        
+
         // Handle Date comparison
         if (a instanceof Date && b instanceof Date) {
             return a.getTime() === b.getTime();
         }
-        
+
         // Handle array comparison
         if (Array.isArray(a) && Array.isArray(b)) {
             if (a.length !== b.length) return false;
             return a.every((item, index) => this.valuesEqual(item, b[index]));
         }
-        
+
         return false;
     }
 }

@@ -19,6 +19,14 @@ class JSONSchemaValidator {
 
     private static readonly FORMAT_VALIDATORS = new Map<string, (value: string) => boolean>();
     private static readonly TYPE_CACHE = new Map<any, string>();
+    private static readonly TYPE_MAP: Record<string, string> = {
+        'undefined': 'undefined',
+        'boolean': 'boolean',
+        'string': 'string',
+        'function': 'function',
+        'symbol': 'symbol',
+        'bigint': 'bigint'
+    };
 
     static {
         this.initializeFormatValidators();
@@ -48,13 +56,13 @@ class JSONSchemaValidator {
 
     public static validateJsonSchema(value: any, schema: any): boolean {
         try {
-            return this.validateSchema(value, schema, '', new Set());
+            return this.validateSchema(value, schema, new Set());
         } catch {
             return false;
         }
     }
 
-    private static validateSchema(value: any, schema: any, path: string, visited: Set<any>): boolean {
+    private static validateSchema(value: any, schema: any, visited: Set<any>): boolean {
         if (!schema || typeof schema !== 'object') return true;
 
         if (schema.type !== undefined) {
@@ -76,41 +84,44 @@ class JSONSchemaValidator {
         } else if (valueType === 'number') {
             if (!this.validateNumber(value, schema)) return false;
         } else if (Array.isArray(value)) {
-            if (!this.validateArray(value, schema, path, visited)) return false;
+            if (!this.validateArray(value, schema, visited)) return false;
         } else if (value !== null && valueType === 'object') {
-            if (!this.validateObject(value, schema, path, visited)) return false;
+            if (!this.validateObject(value, schema, visited)) return false;
         }
 
         if (schema.allOf !== undefined) {
-            if (!this.validateAllOf(value, schema.allOf, path, visited)) return false;
+            if (!this.validateAllOf(value, schema.allOf, visited)) return false;
         }
 
         if (schema.anyOf !== undefined) {
-            if (!this.validateAnyOf(value, schema.anyOf, path, visited)) return false;
+            if (!this.validateAnyOf(value, schema.anyOf, visited)) return false;
         }
 
         if (schema.oneOf !== undefined) {
-            if (!this.validateOneOf(value, schema.oneOf, path, visited)) return false;
+            if (!this.validateOneOf(value, schema.oneOf, visited)) return false;
         }
 
         if (schema.not !== undefined) {
-            if (this.validateSchema(value, schema.not, path, visited)) return false;
+            if (this.validateSchema(value, schema.not, visited)) return false;
         }
 
         if (schema.if !== undefined) {
-            if (!this.validateIfThenElse(value, schema, path, visited)) return false;
+            if (!this.validateIfThenElse(value, schema, visited)) return false;
         }
 
         return true;
     }
 
     private static validateType(value: any, type: string | string[]): boolean {
-        const types = Array.isArray(type) ? type : [type];
         const actualType = this.getJsonType(value);
 
-        for (let i = 0; i < types.length; i++) {
-            if (types[i] === actualType) return true;
-            if (types[i] === 'number' && actualType === 'integer') return true;
+        if (typeof type === 'string') {
+            return type === actualType || (type === 'number' && actualType === 'integer');
+        }
+
+        for (let i = 0; i < type.length; i++) {
+            const t = type[i];
+            if (t === actualType || (t === 'number' && actualType === 'integer')) return true;
         }
 
         return false;
@@ -121,15 +132,11 @@ class JSONSchemaValidator {
         if (Array.isArray(value)) return 'array';
 
         const type = typeof value;
-
         if (type === 'number') {
-            if (Number.isInteger(value) && Number.isFinite(value)) {
-                return 'integer';
-            }
-            return 'number';
+            return (value | 0) === value && Number.isFinite(value) ? 'integer' : 'number';
         }
 
-        return type;
+        return this.TYPE_MAP[type] || type;
     }
 
     private static validateEnum(value: any, enumValues: any[]): boolean {
@@ -187,14 +194,20 @@ class JSONSchemaValidator {
         }
 
         if (schema.multipleOf !== undefined && schema.multipleOf > 0) {
-            const quotient = value / schema.multipleOf;
-            if (Math.abs(quotient - Math.round(quotient)) > Number.EPSILON) return false;
+            const m = schema.multipleOf;
+            // Hot path for integer divisors
+            if (m === (m | 0)) {
+                if (value % m !== 0) return false;
+            } else {
+                const quotient = value / m;
+                if (Math.abs(quotient - Math.round(quotient)) > 1e-12) return false;
+            }
         }
 
         return true;
     }
 
-    private static validateArray(value: any[], schema: any, path: string, visited: Set<any>): boolean {
+    private static validateArray(value: any[], schema: any, visited: Set<any>): boolean {
         const len = value.length;
 
         if (schema.minItems !== undefined && len < schema.minItems) return false;
@@ -207,7 +220,7 @@ class JSONSchemaValidator {
         if (schema.contains !== undefined) {
             let hasMatch = false;
             for (let i = 0; i < len; i++) {
-                if (this.validateSchema(value[i], schema.contains, `${path}[${i}]`, visited)) {
+                if (this.validateSchema(value[i], schema.contains, visited)) {
                     hasMatch = true;
                     break;
                 }
@@ -217,8 +230,9 @@ class JSONSchemaValidator {
 
         if (schema.items !== undefined) {
             if (typeof schema.items === 'object' && !Array.isArray(schema.items)) {
+                const itemSchema = schema.items;
                 for (let i = 0; i < len; i++) {
-                    if (!this.validateSchema(value[i], schema.items, `${path}[${i}]`, visited)) {
+                    if (!this.validateSchema(value[i], itemSchema, visited)) {
                         return false;
                     }
                 }
@@ -226,8 +240,9 @@ class JSONSchemaValidator {
                 const itemSchemas = schema.items;
                 const itemsLen = itemSchemas.length;
 
-                for (let i = 0; i < Math.min(len, itemsLen); i++) {
-                    if (!this.validateSchema(value[i], itemSchemas[i], `${path}[${i}]`, visited)) {
+                const iterations = len < itemsLen ? len : itemsLen;
+                for (let i = 0; i < iterations; i++) {
+                    if (!this.validateSchema(value[i], itemSchemas[i], visited)) {
                         return false;
                     }
                 }
@@ -236,8 +251,9 @@ class JSONSchemaValidator {
                     if (schema.additionalItems === false) return false;
 
                     if (typeof schema.additionalItems === 'object') {
+                        const addSchema = schema.additionalItems;
                         for (let i = itemsLen; i < len; i++) {
-                            if (!this.validateSchema(value[i], schema.additionalItems, `${path}[${i}]`, visited)) {
+                            if (!this.validateSchema(value[i], addSchema, visited)) {
                                 return false;
                             }
                         }
@@ -249,23 +265,11 @@ class JSONSchemaValidator {
         return true;
     }
 
-    private static validateObject(value: any, schema: any, path: string, visited: Set<any>): boolean {
+    private static validateObject(value: any, schema: any, visited: Set<any>): boolean {
         if (visited.has(value)) return true;
         visited.add(value);
 
-        const keys = Object.keys(value);
-        const keyCount = keys.length;
-
-        if (schema.minProperties !== undefined && keyCount < schema.minProperties) {
-            visited.delete(value);
-            return false;
-        }
-
-        if (schema.maxProperties !== undefined && keyCount > schema.maxProperties) {
-            visited.delete(value);
-            return false;
-        }
-
+        // Properties check
         if (schema.required !== undefined && Array.isArray(schema.required)) {
             for (let i = 0; i < schema.required.length; i++) {
                 if (!(schema.required[i] in value)) {
@@ -275,10 +279,27 @@ class JSONSchemaValidator {
             }
         }
 
+        // Optimization: Object.keys is expensive, avoid if not needed
+        let keys: string[] | null = null;
+        
+        if (schema.minProperties !== undefined || schema.maxProperties !== undefined || schema.propertyNames !== undefined || schema.additionalProperties !== undefined) {
+            keys = Object.keys(value);
+            const keyCount = keys.length;
+            if (schema.minProperties !== undefined && keyCount < schema.minProperties) {
+                visited.delete(value);
+                return false;
+            }
+            if (schema.maxProperties !== undefined && keyCount > schema.maxProperties) {
+                visited.delete(value);
+                return false;
+            }
+        }
+
         if (schema.properties !== undefined) {
-            for (const prop in schema.properties) {
+            const props = schema.properties;
+            for (const prop in props) {
                 if (prop in value) {
-                    if (!this.validateSchema(value[prop], schema.properties[prop], `${path}.${prop}`, visited)) {
+                    if (!this.validateSchema(value[prop], props[prop], visited)) {
                         visited.delete(value);
                         return false;
                     }
@@ -304,11 +325,11 @@ class JSONSchemaValidator {
                 patternRegexes.push({ regex, schema: schema.patternProperties[pattern] });
             }
 
-            for (let i = 0; i < keys.length; i++) {
-                const key = keys[i];
+            for (let i = 0; i < (keys || Object.keys(value)).length; i++) {
+                const key = (keys || Object.keys(value))[i];
                 for (let j = 0; j < patternRegexes.length; j++) {
                     if (patternRegexes[j].regex.test(key)) {
-                        if (!this.validateSchema(value[key], patternRegexes[j].schema, `${path}.${key}`, visited)) {
+                        if (!this.validateSchema(value[key], patternRegexes[j].schema, visited)) {
                             visited.delete(value);
                             return false;
                         }
@@ -318,12 +339,9 @@ class JSONSchemaValidator {
         }
 
         if (schema.additionalProperties !== undefined) {
-            const definedProps = schema.properties ? new Set(Object.keys(schema.properties)) : null;
-
-            for (let i = 0; i < keys.length; i++) {
-                const key = keys[i];
-
-                if (definedProps && definedProps.has(key)) continue;
+            const properties = schema.properties;
+            for (const key in value) {
+                if (properties && properties[key] !== undefined) continue;
 
                 let matchesPattern = false;
                 if (patternRegexes) {
@@ -342,7 +360,7 @@ class JSONSchemaValidator {
                     }
 
                     if (typeof schema.additionalProperties === 'object') {
-                        if (!this.validateSchema(value[key], schema.additionalProperties, `${path}.${key}`, visited)) {
+                        if (!this.validateSchema(value[key], schema.additionalProperties, visited)) {
                             visited.delete(value);
                             return false;
                         }
@@ -364,7 +382,7 @@ class JSONSchemaValidator {
                             }
                         }
                     } else if (typeof dependency === 'object') {
-                        if (!this.validateSchema(value, dependency, path, visited)) {
+                        if (!this.validateSchema(value, dependency, visited)) {
                             visited.delete(value);
                             return false;
                         }
@@ -374,8 +392,9 @@ class JSONSchemaValidator {
         }
 
         if (schema.propertyNames !== undefined) {
-            for (let i = 0; i < keys.length; i++) {
-                if (!this.validateSchema(keys[i], schema.propertyNames, `${path}.propertyName`, visited)) {
+            const propKeys = keys || Object.keys(value);
+            for (let i = 0; i < propKeys.length; i++) {
+                if (!this.validateSchema(propKeys[i], schema.propertyNames, visited)) {
                     visited.delete(value);
                     return false;
                 }
@@ -386,25 +405,25 @@ class JSONSchemaValidator {
         return true;
     }
 
-    private static validateAllOf(value: any, schemas: any[], path: string, visited: Set<any>): boolean {
+    private static validateAllOf(value: any, schemas: any[], visited: Set<any>): boolean {
         for (let i = 0; i < schemas.length; i++) {
-            if (!this.validateSchema(value, schemas[i], path, visited)) return false;
+            if (!this.validateSchema(value, schemas[i], visited)) return false;
         }
         return true;
     }
 
-    private static validateAnyOf(value: any, schemas: any[], path: string, visited: Set<any>): boolean {
+    private static validateAnyOf(value: any, schemas: any[], visited: Set<any>): boolean {
         for (let i = 0; i < schemas.length; i++) {
-            if (this.validateSchema(value, schemas[i], path, visited)) return true;
+            if (this.validateSchema(value, schemas[i], visited)) return true;
         }
         return false;
     }
 
-    private static validateOneOf(value: any, schemas: any[], path: string, visited: Set<any>): boolean {
+    private static validateOneOf(value: any, schemas: any[], visited: Set<any>): boolean {
         let validCount = 0;
 
         for (let i = 0; i < schemas.length; i++) {
-            if (this.validateSchema(value, schemas[i], path, visited)) {
+            if (this.validateSchema(value, schemas[i], visited)) {
                 validCount++;
                 if (validCount > 1) return false;
             }
@@ -413,13 +432,13 @@ class JSONSchemaValidator {
         return validCount === 1;
     }
 
-    private static validateIfThenElse(value: any, schema: any, path: string, visited: Set<any>): boolean {
-        const ifResult = this.validateSchema(value, schema.if, path, visited);
+    private static validateIfThenElse(value: any, schema: any, visited: Set<any>): boolean {
+        const ifResult = this.validateSchema(value, schema.if, visited);
 
         if (ifResult && schema.then !== undefined) {
-            return this.validateSchema(value, schema.then, path, visited);
+            return this.validateSchema(value, schema.then, visited);
         } else if (!ifResult && schema.else !== undefined) {
-            return this.validateSchema(value, schema.else, path, visited);
+            return this.validateSchema(value, schema.else, visited);
         }
 
         return true;
@@ -458,17 +477,16 @@ class JSONSchemaValidator {
 
     private static fastEquals(a: any, b: any): boolean {
         if (a === b) return true;
-        if (a == null || b == null) return a === b;
+        if (a === null || b === null) return false;
 
         const typeA = typeof a;
-        const typeB = typeof b;
-
-        if (typeA !== typeB) return false;
+        if (typeA !== typeof b) return false;
 
         if (typeA === 'object') {
-            if (Array.isArray(a) !== Array.isArray(b)) return false;
+            const isArrA = Array.isArray(a);
+            if (isArrA !== Array.isArray(b)) return false;
 
-            if (Array.isArray(a)) {
+            if (isArrA) {
                 const len = a.length;
                 if (len !== b.length) return false;
                 for (let i = 0; i < len; i++) {
@@ -477,19 +495,25 @@ class JSONSchemaValidator {
                 return true;
             }
 
-            const keysA = Object.keys(a);
-            const keysB = Object.keys(b);
-            const len = keysA.length;
-
-            if (len !== keysB.length) return false;
-
-            for (let i = 0; i < len; i++) {
-                const key = keysA[i];
-                if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
-                if (!this.fastEquals(a[key], b[key])) return false;
+            // Object comparison
+            let countA = 0;
+            for (const key in a) {
+                if (Object.prototype.hasOwnProperty.call(a, key)) {
+                    if (!Object.prototype.hasOwnProperty.call(b, key) || !this.fastEquals(a[key], b[key])) {
+                        return false;
+                    }
+                    countA++;
+                }
             }
 
-            return true;
+            let countB = 0;
+            for (const key in b) {
+                if (Object.prototype.hasOwnProperty.call(b, key)) {
+                    countB++;
+                }
+            }
+
+            return countA === countB;
         }
 
         return false;

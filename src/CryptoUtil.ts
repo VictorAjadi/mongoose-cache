@@ -71,26 +71,62 @@ class CryptoUtil {
     static md5Sync(data: any): string {
         this.init();
 
-        const str = typeof data === 'string' ? data : JSON.stringify(data);
-
-        // Node.js path: Use native crypto (synchronous)
-        if (this.hashImpl === 'node' && this.nodeHash) {
-            try {
-                return this.nodeHash
-                    .createHash('md5')
-                    .update(str, 'utf8')
-                    .digest('hex')
-                    .substring(0, 12);
-            } catch (error) {
-                console.error('[CryptoUtil] Node.js MD5 hash failed:', error);
-                return this.simpleHash(str).substring(0, 12);
-            }
+        if (typeof data === 'string') {
+             return this.hashImpl === 'node' && this.nodeHash
+                ? this.nodeHash.createHash('md5').update(data).digest('hex').substring(0, 12)
+                : this.simpleHash(data).substring(0, 12);
         }
 
-        // Bun/WebCrypto: Use deterministic simple hash (synchronous)
-        // WebCrypto API is async-only, but we need sync for cache keys
-        // This is fine because the simple hash is fast and deterministic
-        return this.simpleHash(str).substring(0, 12);
+        // ZERO-ALLOCATION STRUCTURAL HASH
+        // Instead of JSON.stringify (which is O(N) and blocks the loop), we do a fast 
+        // property walk and hash values directly into a 32-bit integer.
+        const hash = this.fastStructuralHash(data);
+        return hash.toString(16).substring(0, 12).padStart(12, '0');
+    }
+
+    private static fastStructuralHash(obj: any, depth: number = 0): number {
+        if (!obj) return 0;
+        const type = typeof obj;
+
+        if (type === 'string') {
+            let h = 0;
+            const len = obj.length;
+            for (let i = 0; i < len; i++) h = (Math.imul(31, h) + obj.charCodeAt(i)) | 0;
+            return h;
+        }
+        if (type === 'number') return obj | 0;
+        if (type === 'boolean') return obj ? 1 : 0;
+        if (obj instanceof Date) return obj.getTime() | 0;
+        
+        // Handle ObjectId/bson types - fast path for hex string
+        if (obj._bsontype) {
+            const s = obj.toString();
+            let h = 0;
+            for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+            return h;
+        }
+
+        if (depth > 4) return 0; // Guard against deep recursion
+
+        let h = 0;
+        if (Array.isArray(obj)) {
+            const len = obj.length;
+            for (let i = 0; i < len; i++) {
+                h = (Math.imul(31, h) + this.fastStructuralHash(obj[i], depth + 1)) | 0;
+            }
+        } else {
+            // Speed Trick: Use a faster way to iterate own properties
+            const keys = Object.keys(obj);
+            const len = keys.length;
+            for (let i = 0; i < len; i++) {
+                const key = keys[i];
+                // Hash key
+                for (let j = 0; j < key.length; j++) h = (Math.imul(31, h) + key.charCodeAt(j)) | 0;
+                // Hash value
+                h = (Math.imul(31, h) + this.fastStructuralHash(obj[key], depth + 1)) | 0;
+            }
+        }
+        return h >>> 0;
     }
 
     /**

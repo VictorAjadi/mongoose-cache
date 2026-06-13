@@ -27,16 +27,15 @@ export class MongoDocumentUtils {
         if (!id) return false;
         
         // Handle ObjectId instances
-        if (id instanceof ObjectId) return true;
+        if (id._bsontype === 'ObjectID' || id._bsontype === 'ObjectId') return true;
         
-        // Handle string ObjectIds
-        if (typeof id === 'string') {
-            return /^[0-9a-fA-F]{24}$/.test(id) && ObjectId.isValid(id);
-        }
-        
-        // Handle objects with ObjectId-like structure
-        if (typeof id === 'object' && id.constructor?.name === 'ObjectId') {
-            return ObjectId.isValid(id.toString());
+        // Handle 24-char hex strings
+        if (typeof id === 'string' && id.length === 24) {
+             for (let i = 0; i < 24; i++) {
+                const c = id.charCodeAt(i);
+                if (!((c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70))) return false;
+             }
+             return true;
         }
         
         return false;
@@ -177,9 +176,11 @@ export class MongoDocumentUtils {
             try {
                 // Handle arrays
                 if (Array.isArray(obj)) {
-                    const clonedArray = obj.map((item, index) => 
-                        cloneRecursive(item, depth + 1, `${path}[${index}]`)
-                    );
+                    const len = obj.length;
+                    const clonedArray = new Array(len);
+                    for (let i = 0; i < len; i++) {
+                        clonedArray[i] = cloneRecursive(obj[i], depth + 1, `${path}[${i}]`);
+                    }
                     visited.delete(obj);
                     pathStack.pop();
                     return clonedArray;
@@ -187,14 +188,18 @@ export class MongoDocumentUtils {
 
                 // Handle plain objects
                 const cloned: any = {};
+                const keys = Object.keys(obj);
+                const len = keys.length;
                 
-                for (const [key, value] of Object.entries(obj)) {
+                for (let i = 0; i < len; i++) {
+                    const key = keys[i];
                     // Skip excluded keys
                     if (excludeKeys.includes(key)) continue;
                     
                     // Skip private keys unless explicitly included
-                    if (!includePrivateKeys && key.startsWith('_') && key !== '_id') continue;
+                    if (!includePrivateKeys && key[0] === '_' && key !== '_id') continue;
                     
+                    const value = obj[key];
                     // Skip function properties and symbols
                     if (typeof value === 'function' || typeof key === 'symbol') continue;
 
@@ -203,9 +208,8 @@ export class MongoDocumentUtils {
                     try {
                         cloned[key] = cloneRecursive(value, depth + 1, keyPath);
                     } catch (error: any) {
-                        console.warn(`Failed to clone property ${keyPath}:`, error);
                         if (preserveCircularRefs) {
-                            cloned[key] = `[Clone Error: ${error?.message}]`;
+                            cloned[key] = `[Clone Error]`;
                         }
                     }
                 }
@@ -242,18 +246,16 @@ export class MongoDocumentUtils {
      * Safe ID comparison with comprehensive validation
      */
     static compareIds(id1: any, id2: any): boolean {
-        try {
-            if (id1 === id2) return true;
-            if (!id1 || !id2) return false;
-            
-            const normalized1 = this.normalizeId(id1);
-            const normalized2 = this.normalizeId(id2);
-            
-            return normalized1.toString() === normalized2.toString();
-        } catch (error) {
-            console.warn('ID comparison failed:', error);
-            return false;
-        }
+        if (id1 === id2) return true;
+        if (!id1 || !id2) return false;
+
+        // HIGH-SPEED ID COMPARISON
+        // Bypasses Regex and normalization for common types
+        const s1 = (typeof id1 === 'string') ? id1 : (id1.toHexString ? id1.toHexString() : String(id1));
+        const s2 = (typeof id2 === 'string') ? id2 : (id2.toHexString ? id2.toHexString() : String(id2));
+        
+        if (s1.length !== s2.length) return false;
+        return s1 === s2;
     }
 
     /**
@@ -267,12 +269,18 @@ export class MongoDocumentUtils {
         
         try {
             if (Array.isArray(obj)) {
-                return obj.some(item => this.hasCircularReference(item, visited));
+                for (let i = 0; i < obj.length; i++) {
+                    if (this.hasCircularReference(obj[i], visited)) return true;
+                }
+                return false;
             }
             
-            return Object.values(obj).some(value => 
-                this.hasCircularReference(value, visited)
-            );
+            const keys = Object.keys(obj);
+            const len = keys.length;
+            for (let i = 0; i < len; i++) {
+                if (this.hasCircularReference(obj[keys[i]], visited)) return true;
+            }
+            return false;
         } finally {
             visited.delete(obj);
         }

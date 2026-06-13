@@ -596,52 +596,35 @@ export class UnifiedCache {
      *   // => "User:find:o:sort=1:q:abc123..."
      */
     public generateKey(modelName: string, op: string, query: any, options?: any): string {
-        const parts = [modelName, op];
-
-        // Hash relevant options if present
-        if (options) {
-            const optionKeys = ['sort', 'limit', 'skip', 'select', 'populate'];
-            let optionsStr = '';
-
-            for (const key of optionKeys) {
-                if (options[key] !== undefined) {
-                    optionsStr += `${key}:${typeof options[key] === 'object' ? 'obj' : options[key]}|`;
-                }
-            }
-
-            if (optionsStr) {
-                parts.push(`o:${this.fastHash(optionsStr)}`);
-            }
-        }
+        // Build key segments - Use a pre-allocated array for speed
+        const parts = new Array(3);
+        parts[0] = modelName;
+        parts[1] = op;
 
         // Hash query or pipeline
         if (query && typeof query === 'object') {
             if (Array.isArray(query)) {
-                // FAST PIPELINE HASH: Use PipelineHashGenerator.generateFastHash which is already optimized
-                parts.push(`p:${PipelineHashGenerator.generateFastHash(query)}`);
+                parts[2] = `p:${PipelineHashGenerator.generateFastHash(query)}`;
+            } else if (query._id && typeof query._id !== 'object') {
+                parts[2] = `q:${String(query._id)}`;
             } else {
-                // FAST QUERY HASH: Avoid deep JSON.stringify for complex queries
-                // We use a shallow signature + length for speed, then hash only if necessary
-                if (query._id) {
-                    parts.push(`q:${String(query._id)}`);
-                } else {
-                    parts.push(`q:${this.fastHash(query)}`);
-                }
+                parts[2] = `q:${this.fastHash(query)}`;
             }
         } else if (query !== undefined) {
-            parts.push(`q:${String(query)}`);
+            parts[2] = `q:${String(query)}`;
         } else {
-            parts.push('q:all');
+            parts[2] = 'q:all';
         }
 
-        const key = parts.join(':');
-
-        // Use hash if key is too long or hashing is configured
-        if (key.length > 120 || this.config.useCryptoHash) {
-            return `${modelName}:${op}:h${this.fastHash(key)}`;
+        // Add options only if they contain data
+        if (options) {
+            const h = this.fastHash(options);
+            if (h !== '000000000000') {
+               parts.push(`o:${h}`);
+            }
         }
 
-        return key;
+        return parts.join(':');
     }
 
 
@@ -713,34 +696,7 @@ export class UnifiedCache {
      *   invalidateByQuery("User", {department: "Engineering"})
      *   // Invalidates all User cache entries matching that query
      */
-    public async invalidateByQuery(modelName: string, updateQuery: any): Promise<number> {
-        try {
-            let invalidatedCount = 0;
 
-            if (this.useRedis && this.redisAdapter && this.redisInitialized) {
-                // Pattern-based invalidation for Redis
-                const pattern = `${modelName}:*`;
-                invalidatedCount = await this.redisAdapter.deletePattern(pattern);
-            } else if (this.memoryCache) {
-                // Smart query-based invalidation for memory cache
-                invalidatedCount = this.memoryCache.invalidateByQuery(modelName, updateQuery);
-            }
-
-            if (this.config.debug && invalidatedCount > 0) {
-                console.log(
-                    `[Cache] Invalidated ${invalidatedCount} entries for ` +
-                    `${modelName} (query: ${JSON.stringify(updateQuery)})`
-                );
-            }
-
-            return invalidatedCount;
-        } catch (error: any) {
-            if (this.config.debug) {
-                console.error('[Cache] Invalidation error:', error.message);
-            }
-            return 0;
-        }
-    }
 
     /**
      * Invalidate all cache entries for a model
@@ -755,28 +711,56 @@ export class UnifiedCache {
      *   invalidateModel("User")
      *   // Clears all cached User queries
      */
+    public getAffectedKeysSync(modelName: string, query: any): string[] {
+        if (!this.memoryCache) return [];
+        return this.memoryCache.getAffectedKeysSync(modelName, query);
+    }
+
     public async invalidateModel(modelName: string): Promise<number> {
+        return this.invalidateModelSync(modelName);
+    }
+
+    public invalidateModelSync(modelName: string): number {
         try {
-            const pattern = `${modelName}:*`;
-            let invalidatedCount = 0;
-
             if (this.useRedis && this.redisAdapter && this.redisInitialized) {
-                invalidatedCount = await this.redisAdapter.deletePattern(pattern);
+                // Background async for redis
+                this.redisAdapter.deletePattern(`${modelName}:*`).catch(() => {});
+                return 0;
             } else if (this.memoryCache) {
-                invalidatedCount = this.memoryCache.invalidateModel(modelName);
+                return this.memoryCache.invalidateModel(modelName);
             }
+            return 0;
+        } catch (error) {
+            return 0;
+        }
+    }
 
-            if (this.config.debug && invalidatedCount > 0) {
-                console.log(
-                    `[Cache] Invalidated ${invalidatedCount} entries for model ${modelName}`
-                );
+    public async invalidateByQuery(modelName: string, query: any): Promise<number> {
+        try {
+            if (this.useRedis && this.redisAdapter && this.redisInitialized) {
+                const pattern = `${modelName}:*`;
+                return await this.redisAdapter.deletePattern(pattern);
+            } else if (this.memoryCache) {
+                return this.memoryCache.invalidateByQuery(modelName, query);
             }
+            return 0;
+        } catch {
+            return 0;
+        }
+    }
 
-            return invalidatedCount;
-        } catch (error: any) {
-            if (this.config.debug) {
-                console.error('[Cache] Model invalidation error:', error.message);
+    public invalidateByQuerySync(modelName: string, query: any): number {
+        try {
+            if (this.useRedis && this.redisAdapter && this.redisInitialized) {
+                // Background task for Redis - for now, clear model as Redis doesn't have 
+                // native index support for queries without Lua or more complexity.
+                this.redisAdapter.deletePattern(`${modelName}:*`).catch(() => {});
+                return 0; 
+            } else if (this.memoryCache) {
+                return this.memoryCache.invalidateByQuery(modelName, query);
             }
+            return 0;
+        } catch (error) {
             return 0;
         }
     }

@@ -90,6 +90,61 @@ app.get('/stats', async (_req, res) => {
         stats
     });
 });
+app.get('/projects', async (_req, res) => {
+    try {
+        const start = performance.now();
+        const projects = await Project.find()
+            .populate({ path: 'ownerId', populate: { path: 'orgId' } })
+            .lean();
+        const end = performance.now();
+
+        res.json({
+            executionTime: `${(end - start).toFixed(4)}ms`,
+            count: projects.length,
+            projects
+        });
+    } catch (err: any) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/projects', async (req, res) => {
+    try {
+        const start = performance.now();
+        const project = await Project.create(req.body);
+        const end = performance.now();
+
+        res.status(201).json({
+            executionTime: `${(end - start).toFixed(4)}ms`,
+            project
+        });
+    } catch (err: any) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.put('/projects/:id', async (req: any, res: any) => {
+    try {
+        const start = performance.now();
+        const project = await Project.findByIdAndUpdate(
+            req.params.id,
+            req.body,
+            { new: true, runValidators: true }
+        );
+        const end = performance.now();
+
+        if (!project) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        res.json({
+            executionTime: `${(end - start).toFixed(4)}ms`,
+            project
+        });
+    } catch (err: any) {
+        res.status(400).json({ error: err.message });
+    }
+});
 
 async function start() {
     try {

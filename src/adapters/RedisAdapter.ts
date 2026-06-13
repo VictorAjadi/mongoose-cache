@@ -17,8 +17,6 @@ export interface InvalidationSignal {
 
 /**
  * Redis adapter with robust connection handling and distributed invalidation support.
- * 
- * FIX: Subscriber connection properly waits for 'ready' event before subscribing
  */
 export class RedisAdapter extends EventEmitter {
     private client: Redis | null = null;
@@ -151,7 +149,7 @@ export class RedisAdapter extends EventEmitter {
                     maxRetriesPerRequest: 3,
                     enableReadyCheck: true,
                     enableOfflineQueue: false,
-                    lazyConnect: true,  // ✅ CRITICAL: Start in lazy mode to control connection timing
+                    lazyConnect: true,  // Start in lazy mode to control connection timing
                     family: 4,
                     connectionName: 'redis-adapter-subscriber',
                 };
@@ -170,7 +168,7 @@ export class RedisAdapter extends EventEmitter {
                     }
                 });
 
-                // ✅ CRITICAL: Wait for subscriber to be ready BEFORE attempting to subscribe
+                // Wait for subscriber to be ready BEFORE attempting to subscribe
                 // This prevents "Stream isn't writeable" errors when enableOfflineQueue is false
                 await new Promise<void>((resolve, reject) => {
                     const timeout = setTimeout(() => {
@@ -195,7 +193,7 @@ export class RedisAdapter extends EventEmitter {
                 });
             }
 
-            // ✅ NOW subscribe after connection is confirmed ready
+            // subscribe after connection is confirmed ready
             await this.subscriber.subscribe(this.INVALIDATION_CHANNEL);
 
             if (this.debugMode) {
@@ -335,31 +333,31 @@ export class RedisAdapter extends EventEmitter {
 
         try {
             const pipeline = this.client.pipeline();
-            const now = Date.now();
+            const now = Math.floor(Date.now() / 1000);
+            const nowMs = Date.now();
 
             for (const [key, { value, ttl, timestamp }] of batch) {
-                if (now - timestamp > 5000) continue;
+                // Skip if entry was replaced in queue or is too old
+                if (nowMs - timestamp > 30000) continue;
 
                 try {
-                    // SINGLE PASS: Combined serialization and size calculation
+                    const isMongooseDoc = !!(value && (value.$__ || value._doc));
                     const { data: serializedValue, size } = DocumentSerializer.serialize(value);
 
                     if (size <= this.config.maxItemSizeMB * 1048576) {
-
                         const entry: CacheEntry = {
                             d: serializedValue,
-                            e: Math.floor(Date.now() / 1000) + ttl,
+                            e: now + ttl,
                             s: size,
                             h: 0,
-                            a: Math.floor(Date.now() / 1000),
-                            t: Math.floor(Date.now() / 1000),
-                            v: 1
+                            a: now,
+                            t: now,
+                            v: 1,
+                            r: typeof value === 'object' && !isMongooseDoc // raw flag for POJOs
                         };
 
-                        const serialized = JSON.stringify(entry);
-                        pipeline.setex(key, ttl, serialized);
-
-                        this.readCache.set(key, { entry, timestamp: now });
+                        pipeline.setex(key, ttl, JSON.stringify(entry));
+                        this.readCache.set(key, { entry, timestamp: nowMs });
                     }
                 } catch (error) {
                     if (this.debugMode) {
@@ -448,7 +446,7 @@ export class RedisAdapter extends EventEmitter {
                 },
                 maxRetriesPerRequest: 3,
                 enableReadyCheck: true,
-                enableOfflineQueue: false, // CRITICAL: Disable offline queue to fail fast
+                enableOfflineQueue: false, // Disable offline queue to fail fast
                 lazyConnect: false,
                 showFriendlyErrorStack: this.debugMode,
                 keepAlive: 30000, // Keep connection alive every 30 seconds
@@ -768,7 +766,17 @@ export class RedisAdapter extends EventEmitter {
             }
 
             const pattern = this.config.redis.keyPrefix + '*';
-            const keys = await this.client.keys(pattern);
+            const keys: string[] = [];
+            let cursor = '0';
+
+            // Fast sampled scan to avoid blocking Redis with KEYS
+            const MAX_SCAN_SAMPLES = 2000;
+            do {
+                const [nextCursor, scannedKeys] = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 1000);
+                cursor = nextCursor;
+                keys.push(...scannedKeys);
+                if (keys.length >= MAX_SCAN_SAMPLES) break;
+            } while (cursor !== '0');
 
             if (keys.length === 0) {
                 return 0;
@@ -905,6 +913,8 @@ export class RedisAdapter extends EventEmitter {
             if (age < this.READ_CACHE_TTL && cached.entry.e > Math.floor(now / 1000)) {
                 try {
                     this.hits++;
+                    // FAST-PATH: Return raw data for lean objects
+                    if (cached.entry.r) return cached.entry.d as T;
                     return DocumentSerializer.deserialize(cached.entry.d) as T;
                 } catch {
                     this.hits--;
@@ -947,6 +957,7 @@ export class RedisAdapter extends EventEmitter {
             });
 
             try {
+                if (entry.r) return entry.d as T;
                 return DocumentSerializer.deserialize(entry.d) as T;
             } catch (error) {
                 if (this.debugMode) {
@@ -1034,7 +1045,17 @@ export class RedisAdapter extends EventEmitter {
         this.writeOperations++;
 
         try {
-            const keys = await this.client.keys(pattern);
+            const keys: string[] = [];
+            let cursor = '0';
+
+            do {
+                const [nextCursor, scannedKeys] = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 1000);
+                cursor = nextCursor;
+                keys.push(...scannedKeys);
+
+                // Safety limit for pattern deletion to avoid massive memory usage
+                if (keys.length > 50000) break;
+            } while (cursor !== '0');
 
             if (keys.length === 0) {
                 return 0;

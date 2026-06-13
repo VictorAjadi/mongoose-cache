@@ -19,7 +19,8 @@
     "allowSyntheticDefaultImports": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "noImplicitReturns": true
+    "noImplicitReturns": true,
+    "ignoreDeprecations": "6.0"
   },
   "ts-node": {
     "esm": true,

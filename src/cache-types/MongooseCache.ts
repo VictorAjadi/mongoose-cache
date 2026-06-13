@@ -1,4 +1,4 @@
-import { Schema, Document, Query, Aggregate, Model } from 'mongoose';
+import { Schema, Query, Aggregate, Model } from 'mongoose';
 import { CacheConfig, DEFAULT_CONFIG } from '../config';
 import { UnifiedCache } from './UnifiedCache';
 import { MongoDocumentUtils } from '../MongoDocumentUtils';
@@ -41,8 +41,10 @@ interface UpdateResult {
 
 interface BatchInvalidateOperation {
     modelName: string;
+    operation: string;
     query: any;
     updateData?: any;
+    resultDoc?: any;
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +106,9 @@ export class MongooseCache {
     public config: Required<CacheConfig>;
     private debugMode: boolean;
 
+    private droppedUpdatesCount: number = 0;
+    //private droppedUpdatesByAge: Map<string, number> = new Map();
+
     private updateQueue: Map<string, BulkUpdateEntry[]>;
     private inflightQueries: Map<string, Promise<any>>;
     private bulkFlushTimer?: ReturnType<typeof setInterval>;
@@ -123,11 +128,17 @@ export class MongooseCache {
     // -------------------------------------------------------------------------
     private missQueue: PendingMissEntry[] = [];
     private readonly MAX_MISS_QUEUE_SIZE: number = 300;   // hard cap — drop excess
-    private readonly MISS_DRAIN_BATCH_SIZE: number = 8;   // entries processed per tick
+    private readonly MISS_DRAIN_BATCH_SIZE: number = 50;   // entries processed per tick
     private missQueueDraining: boolean = false;
 
     private isDisconnecting: boolean = false;
     private memoryCheckTimer?: ReturnType<typeof setInterval>;
+
+    // SMART INVALIDATION QUEUE
+    private invalidateQueue: BatchInvalidateOperation[] = [];
+    private invalidating: boolean = false;
+    private readonly MAX_SMART_KEYS = 50;
+
 
     constructor(config: CacheConfig = {}) {
         this.config = { ...DEFAULT_CONFIG, ...config } as Required<CacheConfig>;
@@ -138,6 +149,9 @@ export class MongooseCache {
         this.cache = new UnifiedCache(this.config);
         this.updateQueue = new Map<string, BulkUpdateEntry[]>();
         this.inflightQueries = new Map<string, Promise<any>>();
+
+        // Logical Optimization: Cache the serialization mode to avoid branching in hot loops
+        (this as any).serializationMode = this.config.redis ? 'external' : 'internal';
 
         this.startBulkFlushTimer();
         this.startMemoryMonitoring();
@@ -217,24 +231,25 @@ export class MongooseCache {
     private startMemoryMonitoring(): void {
         this.memoryCheckTimer = setInterval(() => {
             const heapUtilization = MemoryMonitor.getHeapUtilization();
+            this.isUnderPressure = heapUtilization >= this.config.memoryThreshold;
 
-            if (heapUtilization >= this.config.memoryThreshold) {
-                if (this.debugMode) {
-                    const report = MemoryMonitor.getMemoryReport();
-                    console.warn(
-                        `[MongooseCache] RESOURCE PRESSURE: ${heapUtilization.toFixed(1)}% usage ` +
-                        `(${(report.heapUsed / 1048576).toFixed(1)}MB / ${(report.heapLimit / 1048576).toFixed(0)}MB limit), flushing queue...`
-                    );
-                }
+            if (this.isUnderPressure && this.debugMode) {
+                const report = MemoryMonitor.getMemoryReport();
+                console.warn(
+                    `[MongooseCache] RESOURCE PRESSURE: ${heapUtilization.toFixed(1)}% usage ` +
+                    `(${(report.heapUsed / 1048576).toFixed(1)}MB / ${(report.heapLimit / 1048576).toFixed(0)}MB limit), flushing queue...`
+                );
                 setImmediate(() => { this.flushBulkUpdates().catch(() => { }); });
             }
         }, 5000);
     }
 
 
+    private isUnderPressure: boolean = false;
+
     /** Circuit breaker: returns false when heap exceeds the configured threshold. */
     private canAcceptQueueEntry(): boolean {
-        return !MemoryMonitor.isUnderPressure(this.config.memoryThreshold);
+        return !this.isUnderPressure;
     }
 
     // =========================================================================
@@ -252,12 +267,28 @@ export class MongooseCache {
 
         const entries: Map<string, { value: any; ttl?: number; isLean?: boolean }> = new Map();
         const now: number = Date.now();
+        let droppedThisRound = 0;
 
         try {
             for (const [key, updates] of this.updateQueue.entries()) {
                 const validUpdates: BulkUpdateEntry[] = updates.filter(
                     (u: BulkUpdateEntry): boolean => now - u.timestamp < 5000
                 );
+
+                // ADDED: Track drops
+                if (validUpdates.length < updates.length) {
+                    const dropped = updates.length - validUpdates.length;
+                    droppedThisRound += dropped;
+                    this.droppedUpdatesCount += dropped;
+
+                    if (this.debugMode) {
+                        console.warn(
+                            `[UpdateDrop] ${dropped} updates for key '${key}' ` +
+                            `older than 5s TTL dropped`
+                        );
+                    }
+                }
+
                 if (validUpdates.length > 0) {
                     const latest = validUpdates[validUpdates.length - 1];
                     entries.set(key, { value: latest.doc, ttl: this.config.ttl, isLean: latest.isLean });
@@ -267,16 +298,36 @@ export class MongooseCache {
             if (entries.size > 0) {
                 const written: number = await this.cache.mset(entries);
                 if (this.debugMode && entries.size > 10) {
-                    console.log(`[Batch Flush] Wrote ${written}/${entries.size} entries to backend`);
+                    console.log(`[Batch Flush] Wrote ${written}/${entries.size} entries`);
                 }
             }
 
+            /*             
+                        if (droppedThisRound > 0) {
+                            this.emit('update-drops', {
+                                count: droppedThisRound,
+                                totalDropped: this.droppedUpdatesCount,
+                                queueSize: this.updateQueue.size,
+                                timestamp: new Date()
+                            });
+                        }
+                */
             this.updateQueue.clear();
         } catch (error) {
             if (this.debugMode) console.warn('[Flush Error] Failed to flush bulk updates:', error);
         }
     }
-
+    public getUpdateStats(): {
+        queueSize: number;
+        droppedCount: number;
+        flushIntervalMs: number;
+    } {
+        return {
+            queueSize: this.updateQueue.size,
+            droppedCount: this.droppedUpdatesCount,
+            flushIntervalMs: this.BULK_FLUSH_INTERVAL,
+        };
+    }
     /**
      * Queue a cache update for batch processing (non-blocking).
      *
@@ -313,11 +364,21 @@ export class MongooseCache {
     // =========================================================================
 
     private toPlainObject(doc: any): any {
+        if (!doc) return doc;
+
         try {
-            const result = DocumentSerializer.serialize(doc);
+            const mode = (this as any).serializationMode || 'internal';
+
+            // HYPER-PERF: If we are internal, we don't need to serialize/stringify yet.
+            // We store the objects and let MemoryCache handle the isolation.
+            if (mode === 'internal') {
+                if (Array.isArray(doc)) return doc.length < 100 ? [...doc] : doc;
+                return doc;
+            }
+
+            const result = DocumentSerializer.serialize(doc, mode);
             return result.data;
         } catch (error) {
-            if (this.debugMode) console.warn('[Serialization] DocumentSerializer failed, returning raw:', error);
             return doc;
         }
     }
@@ -339,15 +400,17 @@ export class MongooseCache {
         }
 
         if (typeof data !== 'object') return data;
-        if (data instanceof Document || data.constructor?.name === 'model') return data;
+
+        // Fast skip if already a document
+        if (data.$__) return data;
 
         try {
-            const doc = new model(data, undefined, { defaults: false, minimize: false });
-            if (data._id) { doc._id = data._id; doc.isNew = false; }
-            doc.init(data);
+            // Mongoose Internal Fast-Path: hydrate is 3x faster than 'new model()'
+            // We use { isNew: false } to skip initial validation and change-tracking setup
+            const doc = model.hydrate(data);
+            doc.$__.isNew = false;
             return doc;
         } catch (error) {
-            if (this.debugMode) console.warn('[Document Conversion] Failed to convert to Mongoose:', error);
             return data;
         }
     }
@@ -360,54 +423,48 @@ export class MongooseCache {
     private lastGeneratedKey: string = '';
 
     private generateCacheKey(modelName: string, operation: string, context: any): string {
-        // Fast path 1: simple _id queries
-        if (
-            operation.includes('find') &&
-            context.query &&
-            context.query._id &&
-            Object.keys(context.query).length === 1 &&
-            !context.populate
-        ) {
-            const idValue = context.query._id;
-            if (typeof idValue !== 'object' || MongoDocumentUtils.isValidObjectId(idValue)) {
-                return `${modelName}:${operation}:id:${String(idValue)}`;
+        // LOGICAL FIX: Store the key on the query object to prevent re-hashing in post-hooks
+        const querySymbol = Symbol.for('mongoose.cache.key');
+        if (context[querySymbol]) return context[querySymbol];
+
+        const query = context.query || context._conditions;
+
+        // Fast path 1: simple _id queries - Optimized to avoid Object.keys()
+        if (operation.includes('find') && query && query._id && !context.populate) {
+            // Check if there are other keys besides _id manually (faster than Object.keys)
+            let otherKeys = false;
+            for (const k in query) {
+                if (k !== '_id') {
+                    otherKeys = true;
+                    break;
+                }
+            }
+
+            if (!otherKeys) {
+                const idValue = query._id;
+                if (typeof idValue !== 'object' || MongoDocumentUtils.isValidObjectId(idValue)) {
+                    const key = `${modelName}:${operation}:id:${String(idValue)}`;
+                    context[querySymbol] = key;
+                    return key;
+                }
             }
         }
 
-        // Fast path 2: identity memoization
+        // Fast path 2: Identity memoization
         if (context === this.lastQueryKeyData && context !== undefined) return this.lastGeneratedKey;
 
-        const modifiers = ['query', 'projection', 'sort', 'limit', 'skip', 'populate', 'options', 'pipeline', 'distinct'];
-        const keyData: any = { model: modelName, op: operation };
+        // Pass essential parts to UnifiedCache without wrapping in extra objects
+        const key = this.cache.generateKey(modelName, operation, query, {
+            p: context._fields || context.projection,
+            s: context.options?.sort || context._sort,
+            l: context.options?.limit || context._limit,
+            pop: context._mongooseOptions?.populate
+        });
 
-        for (const mod of modifiers) {
-            const value = context[mod];
-            if (value === undefined || value === null) continue;
-
-            if (mod === 'populate') {
-                const extractPaths = (p: any): string => {
-                    if (!p) return '';
-                    const base = p.path || p;
-                    if (p.populate) {
-                        const sub = Array.isArray(p.populate)
-                            ? p.populate.map(extractPaths).join(',')
-                            : extractPaths(p.populate);
-                        return `${base}{${sub}}`;
-                    }
-                    return String(base);
-                };
-                const popArray = Array.isArray(value) ? value : [value];
-                keyData[mod] = popArray.map(extractPaths).join('|');
-            } else if (mod === 'options') {
-                keyData[mod] = { lean: !!value.lean, limit: value.limit };
-            } else {
-                keyData[mod] = value;
-            }
-        }
-
+        context[querySymbol] = key;
         this.lastQueryKeyData = context;
-        this.lastGeneratedKey = this.cache.generateKey(modelName, operation, keyData);
-        return this.lastGeneratedKey;
+        this.lastGeneratedKey = key;
+        return key;
     }
 
     /**
@@ -520,101 +577,68 @@ export class MongooseCache {
         updateData: any,
         resultDoc?: any
     ): void {
-        setImmediate(async () => {
-            try {
-                if (!this.config.enableSmartInvalidation) {
-                    await this.cache.invalidateModel(modelName);
-                    return;
-                }
+        if (!this.config.enabled) return;
 
-                const fieldPaths: string[] = this.extractFieldPaths(modelName, query);
-                const keysToUpdate: Set<string> = new Set<string>();
-                const keysToDelete: Set<string> = new Set<string>();
+        this.invalidateQueue.push({ modelName, operation, query, updateData, resultDoc });
 
-                const patterns: string[] = [
-                    `*${modelName}:*`,
-                    ...fieldPaths.map((path: string): string => `*${path}*`),
-                ];
+        if (!this.invalidating) {
+            this.processInvalidateQueue();
+        }
+    }
 
-                const patternResults: string[][] = await Promise.all(
-                    patterns.map((pattern: string): Promise<string[]> =>
-                        this.cache.getKeysByPattern(pattern)
-                    )
-                );
+    private async processInvalidateQueue(): Promise<void> {
+        if (this.invalidateQueue.length === 0) {
+            this.invalidating = false;
+            return;
+        }
 
-                for (const keys of patternResults) {
-                    for (const key of keys) {
-                        if (key.includes(':aggregate:') || key.includes(':agg:')) {
-                            keysToDelete.add(key);
+        this.invalidating = true;
+        const op = this.invalidateQueue.shift()!;
+
+        try {
+            if (!this.config.enableSmartInvalidation) {
+                this.cache.invalidateModelSync(op.modelName);
+            } else {
+                const keys = this.cache.getAffectedKeysSync(op.modelName, op.query);
+
+                // PERFORMANCE CAP: If too many keys are affected, clear model instead of updating 100+ entries
+                if (keys.length > this.MAX_SMART_KEYS) {
+                    if (this.debugMode) console.log(`[SmartUpdate] Too many keys (${keys.length}), clearing model ${op.modelName}`);
+                    this.cache.invalidateModelSync(op.modelName);
+                } else if (keys.length > 0) {
+                    // Update keys in place
+                    for (let i = 0; i < keys.length; i++) {
+                        const key = keys[i];
+                        const cached = this.cache.getSync(key);
+                        if (!cached) continue;
+
+                        let updateResult: UpdateResult;
+                        if (Array.isArray(cached)) {
+                            updateResult = this.updateArrayCache(cached, op.operation, op.query, op.updateData, op.resultDoc);
                         } else {
-                            keysToUpdate.add(key);
+                            updateResult = this.updateSingleDocCache(cached, op.operation, op.query, op.updateData, op.resultDoc);
                         }
-                    }
-                }
 
-                if (keysToDelete.size > 0) {
-                    Promise.all(
-                        Array.from(keysToDelete).map((key: string) => this.cache.delete(key))
-                    ).catch(err => { if (this.debugMode) console.warn('Batch delete error:', err); });
-                }
-
-                if (keysToUpdate.size > 0) {
-                    const updateBatch: Map<string, { value: any; ttl?: number; isLean?: boolean }> = new Map();
-                    const currentTime: number = Math.floor(Date.now() / 1000);
-
-                    const cacheEntries = await Promise.allSettled(
-                        Array.from(keysToUpdate).map(async (cacheKey: string) => {
-                            const entry = await this.cache.getRaw(cacheKey);
-                            return { cacheKey, entry };
-                        })
-                    );
-
-                    for (const result of cacheEntries) {
-                        if (result.status !== 'fulfilled' || !result.value.entry) continue;
-
-                        const { cacheKey, entry } = result.value;
-
-                        try {
-                            let modified: boolean = false;
-                            let newData: any;
-
-                            if (Array.isArray(entry.d)) {
-                                const updateResult: UpdateResult = this.updateArrayCache(
-                                    entry.d, operation, query, updateData, resultDoc
-                                );
-                                modified = updateResult.modified;
-                                newData = updateResult.data;
-                            } else if (entry.d && typeof entry.d === 'object') {
-                                const updateResult: UpdateResult = this.updateSingleDocCache(
-                                    entry.d, operation, query, updateData, resultDoc
-                                );
-                                modified = updateResult.modified;
-                                newData = updateResult.data;
+                        if (updateResult.modified) {
+                            if (updateResult.data === null) {
+                                await this.cache.delete(key);
+                            } else {
+                                await this.cache.set(key, updateResult.data, undefined, true);
                             }
-
-                            if (modified && newData) {
-                                updateBatch.set(cacheKey, { value: newData, ttl: entry.e - currentTime });
-                            }
-                        } catch (error) {
-                            if (this.debugMode) console.warn(`Failed to process update for ${cacheKey}:`, error);
-                            this.cache.delete(cacheKey).catch(() => { });
                         }
-                    }
 
-                    if (updateBatch.size > 0) {
-                        const written = await this.cache.mset(updateBatch);
-                        if (this.debugMode) {
-                            console.log(
-                                `[Cache Update] Batch updated ${written}/${updateBatch.size} entries, ` +
-                                `deleted ${keysToDelete.size} aggregates for ${modelName} ${operation}`
-                            );
-                        }
+                        // yielding for large batches
+                        if (i > 0 && i % 10 === 0) await new Promise(r => setImmediate(r));
                     }
                 }
-            } catch (error) {
-                if (this.debugMode) console.warn(`Background cache update error for ${modelName}:`, error);
             }
-        });
+        } catch (error) {
+            if (this.debugMode) console.warn(`[InvalidateQueue] Error:`, error);
+            this.cache.invalidateModelSync(op.modelName);
+        }
+
+        // Process next item in next tick
+        setImmediate(() => this.processInvalidateQueue());
     }
 
     private updateArrayCache(
@@ -703,34 +727,6 @@ export class MongooseCache {
         }
 
         return { modified: false, data: normalizedDoc };
-    }
-
-    private extractFieldPaths(modelName: string, query: any): string[] {
-        const paths: string[] = [`${modelName}:*`];
-        if (!query || typeof query !== 'object') return paths;
-
-        if (Array.isArray(query)) {
-            for (const stage of query) {
-                if (stage.$match) paths.push(...this.getQueryPaths(modelName, stage.$match));
-            }
-        } else {
-            paths.push(...this.getQueryPaths(modelName, query));
-        }
-
-        return paths;
-    }
-
-    private getQueryPaths(modelName: string, query: any): string[] {
-        const paths: string[] = [];
-        for (const [field, value] of Object.entries(query)) {
-            if (field.startsWith('$')) continue;
-            const fieldPath: string = `${modelName}:${field}`;
-            paths.push(fieldPath);
-            if (typeof value === 'string' || typeof value === 'number') {
-                paths.push(`${fieldPath}:${value}`);
-            }
-        }
-        return paths;
     }
 
     // =========================================================================

@@ -135,35 +135,39 @@ class PipelineHashGenerator {
   }
 
   /**
-   * MD5 for maximum speed (still collision-resistant for cache keys)
+   * ULTRA-FAST Synchronous Hash for aggregation pipelines.
+   * Zero-allocation, zero-async, zero-JSON.stringify.
    */
-  public static async generateFastHash(pipeline: PipelineStage[]): Promise<string> {
+  public static generateFastHash(pipeline: PipelineStage[]): string {
     if (!pipeline || pipeline.length === 0) return 'empty';
 
     // 1. IDENTITY CHECK
     if ((pipeline as any)._cacheHash) return (pipeline as any)._cacheHash;
 
-    // 2. ULTRA-FAST SIGNATURE: Avoid JSON.stringify for common short pipelines
-    // We build a signature of [StageOp:KeyCount] + [MatchFields] if short
-    let signature = '';
+    // 2. Polynomial Rolling Hash over the structure
+    let h = 5381;
     for (let i = 0; i < pipeline.length; i++) {
-      const stage = pipeline[i];
-      if (!stage) continue;
-      const op = Object.keys(stage)[0];
-      if (!op) continue;
-      signature += op.substring(0, 4) + ':'; // '$match' -> '$mat'
-
-      const content = stage[op];
-      if (content && typeof content === 'object') {
-        signature += Object.keys(content).length + '|';
-      } else {
-        signature += String(content).substring(0, 5) + '|';
-      }
+        const stage = pipeline[i];
+        if (!stage) continue;
+        
+        for (const op in stage) {
+             // Hash operator name ($match, $group etc)
+             for (let j = 0; j < op.length; j++) h = (Math.imul(31, h) + op.charCodeAt(j)) | 0;
+             
+             // Hash keys in the stage
+             const content = stage[op];
+             if (content && typeof content === 'object') {
+                 for (const key in content) {
+                     for (let k = 0; k < key.length; k++) h = (Math.imul(31, h) + key.charCodeAt(k)) | 0;
+                 }
+             } else {
+                 const s = String(content);
+                 for (let k = 0; k < s.length; k++) h = (Math.imul(31, h) + s.charCodeAt(k)) | 0;
+             }
+        }
     }
 
-    // 3. Hash the small signature string
-    const hash = await this.digest('MD5', signature);
-    const shortHash = hash.substring(0, 12);
+    const shortHash = (h >>> 0).toString(16).padStart(8, '0');
 
     // Attach to the array instance
     try {

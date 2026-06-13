@@ -443,13 +443,22 @@ class MultiClientStressTest {
     private printFinalMetrics() {
         const metrics = this.metricsCollector.getMetrics();
         const duration = (this.testEndTime - this.testStartTime) / 1000;
+
+        // GET CACHE STATS (NEW)
+        let cacheStats: any = null;
+        try {
+            // Assuming cache has stats method
+            // cacheStats = await this.cache.getStats();
+        } catch (e) {
+            // Ignore if not available
+        }
+
         const actualRPS = metrics.totalRequests / duration;
         const successRate = (metrics.successfulRequests / metrics.totalRequests) * 100;
         const hitRate = metrics.cacheHits + metrics.cacheMisses > 0
             ? (metrics.cacheHits / (metrics.cacheHits + metrics.cacheMisses)) * 100
             : 0;
 
-        // Calculate percentiles
         const sortedLatencies = [...metrics.latencies].sort((a, b) => a - b);
         const p50 = sortedLatencies[Math.floor(sortedLatencies.length * 0.5)] || 0;
         const p95 = sortedLatencies[Math.floor(sortedLatencies.length * 0.95)] || 0;
@@ -469,6 +478,26 @@ class MultiClientStressTest {
         console.log(`Target RPS: ${this.config.operationsPerSecond}`);
         console.log(`Actual RPS: ${actualRPS.toFixed(2)}`);
         console.log(`Success Rate: ${successRate.toFixed(2)}%`);
+
+        // ADDED: Cache metrics
+        if (cacheStats) {
+            console.log(`\n💾 Cache Statistics:`);
+            console.log(`  Cache Type: ${cacheStats.cacheType || 'unknown'}`);
+            console.log(`  Cache Size: ${cacheStats.cachedDataMB || 0}MB`);
+            console.log(`  Max Size: ${cacheStats.maxCacheMB || 0}MB`);
+            console.log(`  Keys Cached: ${cacheStats.keys || 0}`);
+            console.log(`  Hit Rate: ${hitRate.toFixed(2)}%`);
+            console.log(`  Cache Hits: ${metrics.cacheHits}`);
+            console.log(`  Cache Misses: ${metrics.cacheMisses}`);
+
+            if (cacheStats.evictions) {
+                console.log(`  Evictions: ${cacheStats.evictions}`);
+            }
+            if (cacheStats.underMemoryPressure !== undefined) {
+                console.log(`  Memory Pressure: ${cacheStats.underMemoryPressure ? 'YES' : 'NO'}`);
+            }
+        }
+
         console.log(`\n📈 Latency Statistics (ms):`);
         console.log(`  Min: ${minLatency.toFixed(2)}ms`);
         console.log(`  Average: ${avgLatency.toFixed(2)}ms`);
@@ -476,11 +505,8 @@ class MultiClientStressTest {
         console.log(`  P50: ${p50.toFixed(2)}ms`);
         console.log(`  P95: ${p95.toFixed(2)}ms`);
         console.log(`  P99: ${p99.toFixed(2)}ms`);
-        console.log(`\n💾 Cache Statistics:`);
-        console.log(`  Cache Hits: ${metrics.cacheHits}`);
-        console.log(`  Cache Misses: ${metrics.cacheMisses}`);
-        console.log(`  Hit Rate: ${hitRate.toFixed(2)}%`);
         console.log(`\n📝 Operation Breakdown:`);
+
         for (const [op, count] of metrics.operationTypes) {
             console.log(`  ${op}: ${count} (${((count / metrics.totalRequests) * 100).toFixed(2)}%)`);
         }
